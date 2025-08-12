@@ -8,3 +8,8 @@ dependencies = [
     "discord-py>=2.5.2",
     "dotenv>=0.9.9",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.8",
+]
