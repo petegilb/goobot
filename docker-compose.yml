@@ -5,34 +5,16 @@ services:
     build: .
     networks:
       - goo
-    develop:
-      # Create a `watch` configuration to update the app
-      # https://docs.docker.com/compose/file-watch/#compose-watch-versus-bind-mounts
-      watch:
-        # Sync the working directory with the `/app` directory in the container
-        - action: sync
-          path: .
-          target: /app
-          # Exclude the project virtual environment — it could be for a
-          # different platform in the container
-          ignore:
-            - .venv/
-
-        # Rebuild the image if dependencies change by checking uv.lock
-        - action: rebuild
-          path: ./uv.lock
   db:
     image: postgres:17.6-bookworm
     restart: always
     env_file: ".env"
     volumes:
       - ./db:/var/lib/postgresql/data
-    ports:
-      - '5432:5432'
     networks:
       - goo
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -d postgres" ]
+      test: [ "CMD-SHELL", "pg_isready -d postgres -U postgres"]
       interval: 30s
       timeout: 10s
       retries: 5
