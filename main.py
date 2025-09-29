@@ -1,14 +1,21 @@
 import os
+import logging
+import logging.handlers
+import asyncio
+from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-import logging
-import logging.handlers
+import asyncpg
+from src.models.user import CREATE_USER_TABLE_SQL
+from src.util import init_tables
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+PG_USER = os.getenv("POSTGRES_USER", 'postgres')
+PG_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+PG_HOST = os.getenv("POSTGRES_HOST", "localhost")
 
 # referenced: https://discordpy.readthedocs.io/en/stable/logging.html#setting-up-logging
 logger = logging.getLogger('discord')
@@ -29,12 +36,31 @@ logger.addHandler(handler)
 logger.addHandler(stream_handler)
 
 # referenced: https://github.com/egeyardimci/Discord-Py-Bot-Template/blob/master/bot.py
-cogs: list[str] = ["cogs.goo.goo", "cogs.greet.greet"]
+cogs: list[str] = ["cogs.goo.goo", "cogs.greet.greet", "cogs.admin.admin"]
 
 print("Hello from goobot!")
 intents = discord.Intents.all()
 intents.message_content = True
-client = commands.Bot(command_prefix="!", help_command=None, intents=intents)
+
+class GooBot(commands.Bot):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.db_pool: asyncpg.Pool | None = None
+
+    async def setup_hook(self):
+        self.db_pool = await asyncpg.create_pool(
+            user=PG_USER, password=PG_PASSWORD,
+            database='postgres', host=PG_HOST
+        )
+
+        await init_tables(self.db_pool)
+
+    async def close(self):
+        if self.db_pool:
+            await self.db_pool.close()
+        await super().close()
+
+client = GooBot(command_prefix="!", help_command=None, intents=intents)
 
 @client.event
 async def on_ready():
