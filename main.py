@@ -2,10 +2,12 @@ import os
 import logging
 import logging.handlers
 import asyncio
+from datetime import datetime
+from typing import Dict
 from dotenv import load_dotenv
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncpg
 from src.models.user import CREATE_USER_TABLE_SQL
 from src.util import init_tables
@@ -46,6 +48,7 @@ class GooBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.db_pool: asyncpg.Pool | None = None
+        self.jail_counter: Dict[int, datetime] = {}
 
     async def setup_hook(self):
         self.db_pool = await asyncpg.create_pool(

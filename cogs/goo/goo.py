@@ -2,11 +2,12 @@ import os
 import logging
 import random
 import datetime
+import asyncio
 from typing import TYPE_CHECKING
 
 import asyncpg
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from src.models.user import User, init_user, increment_user_field, update_user, get_user
 from src.models.stat import get_stats, set_goo_lord, set_biggest_loser
 
@@ -19,8 +20,15 @@ logger = logging.getLogger('discord')
 GOO_CHANNELS = [int(channel) for channel in os.getenv('GOO_CHANNELS', []).split(',')]
 GOO_CHANCE = 5
 GOO_COOLDOWN = 180
+# GOO_CHANCE = 100
+# GOO_COOLDOWN = 1
+# GOO_LONG_COOLDOWN_CHANCE = 100
+# GOO_LONG_COOLDOWN = 60
 GOO_LONG_COOLDOWN_CHANCE = 1
+GOO_LONG_COOLDOWN = 60*60
 GOOLORD_ROLE_ID = int(os.getenv('GOOLORD_ROLE_ID'))
+GOO_JAIL_ROLE_ID = int(os.getenv('GOO_JAIL_ROLE_ID'))
+GUILD_ID= int(os.getenv('GUILD_ID'))
 
 LOSS_MESSAGE = "no please {0} i dont want to hop in your goo"
 WIN_MESSAGE = """fine...  i'll hop in your goo, {0}...
@@ -50,6 +58,58 @@ class Goo(commands.Cog):
 
     def __init__(self, bot):
         self.bot: GooBot = bot
+        self.free_from_jail.start()
+        asyncio.create_task(self.check_existing_goolord())
+
+    def cog_unload(self):
+        self.free_from_jail.cancel()
+
+    async def check_existing_goolord(self):
+        """
+        If the db has been reset, remove any existing goo lords!
+        """
+        logger.info("Checking to see if there are any existing goo lords not in the db")
+        while self.bot.db_pool is None:
+            await asyncio.sleep(6)
+        channel: discord.guild.GuildChannel = self.bot.get_channel(GOO_CHANNELS[0])
+        guild: discord.Guild = self.bot.get_guild(GUILD_ID)
+        goolord_role = guild.get_role(GOOLORD_ROLE_ID)
+        if not (goolord_role and guild and channel):
+            return
+        
+        current_goolord = await get_goolord(self.bot.db_pool)
+        for goolord in goolord_role.members:
+            if current_goolord is not None and current_goolord.id == goolord.id:
+                continue
+            await goolord.remove_roles(goolord_role)
+            await channel.send(f"<@{goolord.id}>, I have no record of any goo lord, so I am removing your role!")
+
+    @tasks.loop(seconds=5.0)
+    async def free_from_jail(self):
+        channel: discord.guild.GuildChannel = self.bot.get_channel(GOO_CHANNELS[0])
+        guild = self.bot.get_guild(GUILD_ID)
+        jail_role = guild.get_role(GOO_JAIL_ROLE_ID)
+        if not (channel and guild and jail_role):
+            return
+        
+        # free all users not stored in memory...
+        for member in jail_role.members:
+            if self.bot.jail_counter.get(member.id):
+                continue
+            await member.remove_roles(jail_role)
+            await channel.send(f"<@{member.id}>, you are now free from jail.")
+
+        # free all users stored in memory
+        new_jail_counter = self.bot.jail_counter.copy()
+        for user_id in self.bot.jail_counter.keys():
+            if self.bot.jail_counter[user_id] <= datetime.datetime.now():
+                user = guild.get_member(user_id)
+                new_jail_counter.pop(user_id)
+                await user.remove_roles(jail_role)
+                await channel.send(f"<@{user_id}>, you are now free from jail.")
+        
+        # TODO add an asyncio lock for this? 
+        self.bot.jail_counter = new_jail_counter
     
     @commands.cooldown(1, GOO_COOLDOWN, commands.BucketType.user)
     @commands.command()
@@ -77,7 +137,7 @@ class Goo(commands.Cog):
         stats = await get_stats(pool)
         current_lord = await get_goolord(pool, stats)
         if current_lord is not None and current_lord.id == member.id:
-            await ctx.send("My liege, you are already the lord of goo. One cannet overthrow thyself.")
+            await ctx.reply("My liege, you are already the lord of goo. One cannet overthrow thyself.")
             return
 
         # check if we become the next goo lord
@@ -90,7 +150,8 @@ class Goo(commands.Cog):
 
             # update the goo lord to the new lord!
             await set_goo_lord(pool, member.id, now, ctx)
-            # TODO assign goo lord role
+
+            # assign goo lord role
             goolord_role = ctx.guild.get_role(GOOLORD_ROLE_ID)
             if current_lord is not None:
                 current_lord_disc = ctx.guild.get_member(current_lord.id)
@@ -126,6 +187,15 @@ class Goo(commands.Cog):
             if biggest_loser is None:
                 logger.debug("setting first biggest loser")
                 await set_biggest_loser(pool, member.id)
+            
+            # send to goo jail if 1 percent chance is hit
+            roll = random.randint(1, 100)
+            if roll <= GOO_LONG_COOLDOWN_CHANCE:
+                goo_jail_role = ctx.guild.get_role(GOO_JAIL_ROLE_ID)
+                self.bot.jail_counter[member.id] = datetime.datetime.now() + datetime.timedelta(seconds=GOO_LONG_COOLDOWN)
+                await member.add_roles(goo_jail_role)
+                await ctx.reply(f"Your attempt to overthrow the lord has been thwarted. You have been sent to jail for {round(GOO_LONG_COOLDOWN / 60)} minutes!")
+
         await update_user(pool, member.id, updates)
 
     @commands.command()
