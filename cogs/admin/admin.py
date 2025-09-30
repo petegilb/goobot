@@ -28,6 +28,7 @@ class Admin(commands.Cog):
             for table in ALL_TABLES:
                 await conn.execute(f"DROP TABLE {table};")
         await init_tables(pool)
+        await ctx.send("DB RESET!")
 
     @commands.hybrid_command(
         name="ping",
