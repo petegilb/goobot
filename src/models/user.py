@@ -48,6 +48,13 @@ async def init_user(pool: asyncpg.Pool, ctx: commands.Context, member: discord.M
             row = await conn.fetchrow(sql, ctx.author.id, ctx.author.name)
             return User.model_validate(dict(row)) if row else None
 
+async def get_user(pool: asyncpg.Pool, id:int):
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT * FROM users WHERE id=$1;", id)
+            return User.model_validate(dict(row)) if row else None
+
 async def update_user(pool: asyncpg.Pool, id:int, updates: Dict[str, Any]):
     await update_fields(pool, 'users', id, updates)
 

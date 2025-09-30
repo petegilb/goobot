@@ -5,6 +5,7 @@ from typing import Optional, TYPE_CHECKING
 import asyncpg
 import discord
 from discord.ext import commands
+from src.util import update_fields
 
 if TYPE_CHECKING:
     # from discord.ext.commands._types import BotT
@@ -16,7 +17,8 @@ CREATE TABLE IF NOT EXISTS stats (
     last_winner_id    BIGINT REFERENCES users(id),
     last_winner_at    TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    biggest_loser_id    BIGINT REFERENCES users(id)
 );
 -- ensure the single row exists:
 INSERT INTO stats (id) VALUES (1)
@@ -32,6 +34,7 @@ class Stat(BaseModel):
     last_winner_at: datetime|None
     created_at: datetime
     updated_at: datetime
+    biggest_loser_id: int|None
 
 async def get_stats(pool: asyncpg.Pool) -> Stat:
     async with pool.acquire() as connection:
@@ -40,27 +43,20 @@ async def get_stats(pool: asyncpg.Pool) -> Stat:
             row = await conn.fetchrow("SELECT * FROM stats")
             return Stat.model_validate(dict(row)) if row else None
 
-# TODO remove this (im just using it for reference)
-async def set_last_winner(pool, winner_id: int):
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # lock the single-row so concurrent updates serialize
-            row = await conn.fetchrow("SELECT * FROM stats WHERE id=1 FOR UPDATE")
-            if not row:
-                # create the single row if somehow missing
-                await conn.execute(
-                    "INSERT INTO stats (id, last_winner_id, last_winner_at, total_games) VALUES (1, $1, now(), 1)",
-                    winner_id
-                )
-                return
-            await conn.execute(
-                """
-                UPDATE stats
-                   SET last_winner_id = $1,
-                       last_winner_at = now(),
-                       total_games = stats.total_games + 1,
-                       updated_at = now()
-                 WHERE id = 1
-                """,
-                winner_id
-            )
+async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: datetime):
+    updates = {
+        'last_winner_id': last_winner_id,
+        'last_winner_at': win_time,
+        'updated_at': win_time
+    }
+    await update_fields(pool, 'stats', 1, updates)
+
+    # TODO assign goo lord role
+
+
+async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int):
+    updates = {
+        'biggest_loser_id': biggest_loser_id,
+        'updated_at': datetime.now()
+    }
+    await update_fields(pool, 'stats', 1, updates)
