@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import random
 import datetime
@@ -20,15 +21,17 @@ logger = logging.getLogger('discord')
 GOO_CHANNELS = [int(channel) for channel in os.getenv('GOO_CHANNELS', []).split(',')]
 GOO_CHANCE = 5
 GOO_COOLDOWN = 180
-# GOO_CHANCE = 100
-# GOO_COOLDOWN = 1
-# GOO_LONG_COOLDOWN_CHANCE = 100
-# GOO_LONG_COOLDOWN = 60
 GOO_LONG_COOLDOWN_CHANCE = 1
 GOO_LONG_COOLDOWN = 60*60
 GOOLORD_ROLE_ID = int(os.getenv('GOOLORD_ROLE_ID'))
 GOO_JAIL_ROLE_ID = int(os.getenv('GOO_JAIL_ROLE_ID'))
 GUILD_ID= int(os.getenv('GUILD_ID'))
+
+# NOTE: DEBUG VALUES!!!
+# GOO_CHANCE = 100
+# GOO_COOLDOWN = 1
+# GOO_LONG_COOLDOWN_CHANCE = 100
+# GOO_LONG_COOLDOWN = 60
 
 LOSS_MESSAGE = "no please {0} i dont want to hop in your goo"
 WIN_MESSAGE = """fine...  i'll hop in your goo, {0}...
@@ -164,13 +167,13 @@ class Goo(commands.Cog):
                 await ctx.send(f"You are the first one to rise up and lead the kingdom of goo! All hail the first goo lord, {name}!")
             else:
                 old_lord = current_lord
-                reign_time = now - old_lord.last_win
+                reign_time = datetime.datetime.now(tz=datetime.timezone.utc) - old_lord.last_win
                 old_lord_lord_time = old_lord.lord_time + reign_time.total_seconds()
                 old_lord_updates = {
                     'lord_time': old_lord_lord_time
                 }
 
-                update_user(pool, old_lord.id, old_lord_updates)
+                await update_user(pool, old_lord.id, old_lord_updates)
                 response = f"{response}\nthe last goo lord was <@{current_lord.id}>. they were lord for {round(float(old_lord_lord_time)/60, ndigits=2)} minutes(s)."
             
             await ctx.send(response)
@@ -215,6 +218,79 @@ class Goo(commands.Cog):
             color=0x39e81a,
         )
         await ctx.send(embed=embed)
+    
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooreign(self, ctx: commands.Context, in_user = None, member: discord.Member = None):
+        reign_user = None
+        if in_user is not None and in_user:
+            if "<" in str(in_user):
+                numbers_list = re.findall(r'\d+', str(in_user))
+                numbers_only = "".join(numbers_list)
+                in_user_id = int(numbers_only)
+                reign_user = ctx.guild.get_member(in_user_id)
+            else:
+                reign_user = ctx.guild.get_member_named(str(in_user))
+            
+            if reign_user is None:
+                await ctx.reply(f"Couldn't find user: {in_user}", delete_after=10)
+                return
+        else:
+            reign_user = ctx.author
+        
+        current_goolord = await get_goolord(self.bot.db_pool)
+        reign_user_name = reign_user.nick if reign_user.nick is not None else reign_user.name
+
+        db_reign_user = await get_user(self.bot.db_pool, reign_user.id)
+
+        # if the user doesnt exist in the db or they have no wins
+        if db_reign_user is None or db_reign_user.win_count <= 0:
+            response = f"Ah yes, the peasant, {reign_user_name}, has never ruled."
+            await ctx.reply(response)
+            return
+
+        num_wins = db_reign_user.win_count
+        win_time = db_reign_user.lord_time
+
+        # if the user is the current goo lord, calculate the total time (including the current reign)
+        if current_goolord.id == reign_user.id:
+            current_reign = datetime.datetime.now(tz=datetime.timezone.utc) - db_reign_user.last_win
+            win_time = db_reign_user.lord_time + current_reign.total_seconds()
+
+        win_time = round(float(win_time)/60, 2)
+
+        response = f"Ah yes, the glorious reign of {reign_user_name} the great."
+        response = f"{response}\nThey have ruled over the kingdom of Flan {num_wins} time(s) for a total time of: {win_time} minute(s)."
+
+        await ctx.reply(response)
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooleaderboard(self, ctx: commands.Context, *, member: discord.Member = None):
+        pass
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooloserboard(self, ctx: commands.Context, *, member: discord.Member = None):
+        pass
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooloser(self, ctx: commands.Context, *, member: discord.Member = None):
+        pass
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def goohopboard(self, ctx: commands.Context, *, member: discord.Member = None):
+        pass
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooball(self, ctx: commands.Context, *, member: discord.Member = None):
+        embed=discord.Embed(title="GOOOOOOB", color=0xb0ff70)
+        embed.set_image(url=f"https://c.tenor.com/UCkUaBYlktkAAAAC/tenor.gif")
+        await ctx.reply(embed=embed)
+
         
 async def setup(bot: commands.Bot):
     await bot.add_cog(Goo(bot))
