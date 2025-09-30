@@ -43,15 +43,13 @@ async def get_stats(pool: asyncpg.Pool) -> Stat:
             row = await conn.fetchrow("SELECT * FROM stats")
             return Stat.model_validate(dict(row)) if row else None
 
-async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: datetime):
+async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: datetime, ctx: commands.Context):
     updates = {
         'last_winner_id': last_winner_id,
         'last_winner_at': win_time,
         'updated_at': win_time
     }
     await update_fields(pool, 'stats', 1, updates)
-
-    # TODO assign goo lord role
 
 
 async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int):

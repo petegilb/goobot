@@ -5,7 +5,6 @@ import asyncpg
 import discord
 from discord.ext import commands
 from src.util import init_tables, ALL_TABLES
-from src.models.user import User, init_user
 
 if TYPE_CHECKING:
     # from discord.ext.commands._types import BotT

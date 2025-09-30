@@ -20,6 +20,7 @@ GOO_CHANNELS = [int(channel) for channel in os.getenv('GOO_CHANNELS', []).split(
 GOO_CHANCE = 5
 GOO_COOLDOWN = 180
 GOO_LONG_COOLDOWN_CHANCE = 1
+GOOLORD_ROLE_ID = int(os.getenv('GOOLORD_ROLE_ID'))
 
 LOSS_MESSAGE = "no please {0} i dont want to hop in your goo"
 WIN_MESSAGE = """fine...  i'll hop in your goo, {0}...
@@ -50,6 +51,7 @@ class Goo(commands.Cog):
     def __init__(self, bot):
         self.bot: GooBot = bot
     
+    @commands.cooldown(1, GOO_COOLDOWN, commands.BucketType.user)
     @commands.command()
     @commands.check(is_goo_channel)
     async def hopinmygoo(self, ctx: commands.Context, *, member: discord.Member = None):
@@ -87,7 +89,14 @@ class Goo(commands.Cog):
             response = WIN_MESSAGE.format(name, user.loss_count)
 
             # update the goo lord to the new lord!
-            await set_goo_lord(pool, member.id, now)
+            await set_goo_lord(pool, member.id, now, ctx)
+            # TODO assign goo lord role
+            goolord_role = ctx.guild.get_role(GOOLORD_ROLE_ID)
+            if current_lord is not None:
+                current_lord_disc = ctx.guild.get_member(current_lord.id)
+                if current_lord_disc:
+                    await current_lord_disc.remove_roles(goolord_role)
+            await member.add_roles(goolord_role)
 
             # update the lord_time of the current goo lord (if they exist)
             if current_lord is None:
@@ -118,7 +127,7 @@ class Goo(commands.Cog):
                 logger.debug("setting first biggest loser")
                 await set_biggest_loser(pool, member.id)
         await update_user(pool, member.id, updates)
-    
+
     @commands.command()
     @commands.check(is_goo_channel)
     async def goostats(self, ctx: commands.Context, *, member: discord.Member = None):

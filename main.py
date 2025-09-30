@@ -60,6 +60,18 @@ class GooBot(commands.Bot):
             await self.db_pool.close()
         await super().close()
 
+    async def on_command_error(self, ctx: commands.Context, exception):
+        if isinstance(exception, commands.CommandOnCooldown):
+            name = ctx.author
+            if name and name.nick:
+                name = name.nick
+            await ctx.reply(
+                f'{ctx.command} is on cooldown, {ctx.author}, you can use it in {round(exception.retry_after, 2)} seconds...',
+                delete_after=5, silent=True
+            )
+
+        return await super().on_command_error(ctx, exception)
+
 client = GooBot(command_prefix="!", help_command=None, intents=intents)
 
 @client.event
