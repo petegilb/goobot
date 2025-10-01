@@ -38,7 +38,7 @@ logger.addHandler(handler)
 logger.addHandler(stream_handler)
 
 # referenced: https://github.com/egeyardimci/Discord-Py-Bot-Template/blob/master/bot.py
-cogs: list[str] = ["cogs.goo.goo", "cogs.greet.greet", "cogs.admin.admin"]
+cogs: list[str] = ["cogs.goo.goo", "cogs.greet.greet", "cogs.admin.admin", "cogs.game.game"]
 
 print("Hello from goobot!")
 intents = discord.Intents.all()
