@@ -4,12 +4,13 @@ import logging
 import random
 import datetime
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Dict
 
 import asyncpg
 import discord
+from tabulate import tabulate
 from discord.ext import commands, tasks
-from src.models.user import User, init_user, increment_user_field, update_user, get_user
+from src.models.user import User, init_user, increment_user_field, update_user, get_user, get_all_users
 from src.models.stat import get_stats, set_goo_lord, set_biggest_loser
 
 if TYPE_CHECKING:
@@ -267,22 +268,78 @@ class Goo(commands.Cog):
     @commands.command()
     @commands.check(is_goo_channel)
     async def gooleaderboard(self, ctx: commands.Context, *, member: discord.Member = None):
-        pass
+        stats = await get_stats(self.bot.db_pool)
+        current_goolord = await get_goolord(self.bot.db_pool, stats)
+        biggest_loser = await get_biggest_loser(self.bot.db_pool, stats)
 
-    @commands.command()
-    @commands.check(is_goo_channel)
-    async def gooloserboard(self, ctx: commands.Context, *, member: discord.Member = None):
-        pass
+        db_users = await get_all_users(self.bot.db_pool)
+        discord_users = [ctx.guild.get_member(db_user.id) for db_user in db_users]
+
+        # calculate current lord time
+        if current_goolord is not None:
+            for idx in range(len(db_users)):
+                user = db_users[idx]
+                if  user.id != current_goolord.id:
+                    continue
+                reign_time = datetime.datetime.now(tz=datetime.timezone.utc) - user.last_win
+                db_users[idx].lord_time = user.lord_time + reign_time.total_seconds()
+            
+        discord_users_dict: Dict[int, discord.Member] = {}
+        # add discord_users to dict for easier retrieval
+        for user in discord_users:
+            discord_users_dict[user.id] = user
+
+        sorted_db_users = sorted(db_users, key=lambda user: user.lord_time, reverse=True)
+
+        headers = ["User", "Time", "Win", "Loss", "Hops"]
+        data = []
+
+        for db_user in sorted_db_users:
+            if db_user is None:
+                continue
+            user = discord_users_dict.get(db_user.id)
+            if user is None:
+                continue
+            
+            name = user.nick if user.nick else user.name
+            if current_goolord is not None and current_goolord.id == db_user.id:
+                name = f"[32m{name}[0m"
+            elif biggest_loser is not None and biggest_loser.id == db_user.id:
+                name = f"[31m{name}[0m"
+            lord_time_min = round(float(db_user.lord_time)/60, 2)
+            user_data = [name, lord_time_min, db_user.win_count, db_user.loss_count, db_user.hopped_goo]
+            data.append(user_data)
+        
+        table_str = tabulate(data, headers)
+        await ctx.send(f"```ansi\n{table_str}```")
 
     @commands.command()
     @commands.check(is_goo_channel)
     async def gooloser(self, ctx: commands.Context, *, member: discord.Member = None):
-        pass
+        biggest_loser = await get_biggest_loser(self.bot.db_pool)
+        if biggest_loser is None:
+            await ctx.reply("Nobody is the biggest loser yet! Let's see some goo hopping, peasant!")
+        discord_loser = ctx.guild.get_member(biggest_loser.id)
+        if discord_loser is None:
+            return
+        
+        name = discord_loser.nick if discord_loser.nick else discord_loser.name
+        loser_str = "The goo loser record is held by {0} with the most unsuccessful attempts to overthrow the goo lord. They attempted {1} time(s)."
+        await ctx.reply(loser_str.format(name, biggest_loser.loss_count))
 
     @commands.command()
     @commands.check(is_goo_channel)
-    async def goohopboard(self, ctx: commands.Context, *, member: discord.Member = None):
-        pass
+    async def goolord(self, ctx: commands.Context, *, member: discord.Member = None):
+        current_goolord = await get_goolord(self.bot.db_pool)
+        if current_goolord is None:
+            await ctx.reply("The throne lies empty...")
+            return
+        
+        reign_time = datetime.datetime.now(tz=datetime.timezone.utc) - current_goolord.last_win
+        lord_time = current_goolord.lord_time + reign_time.total_seconds()
+        lord_time = round(float(lord_time)/60, 2)
+        lord_str = f"the current goo lord is <@{current_goolord.id}>. their current reign has been {lord_time} minute(s)."
+        await ctx.reply(lord_str)
 
     @commands.command()
     @commands.check(is_goo_channel)
