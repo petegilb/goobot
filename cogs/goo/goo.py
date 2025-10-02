@@ -294,7 +294,7 @@ class Goo(commands.Cog):
 
         sorted_db_users = sorted(db_users, key=lambda user: user.lord_time, reverse=True)
 
-        headers = ["User", "Time", "Win", "Loss", "Hops"]
+        headers = ["User", "Time", "Win", "Loss", "Hops", "LS"]
         data = []
 
         for db_user in sorted_db_users:
@@ -310,7 +310,7 @@ class Goo(commands.Cog):
             elif biggest_loser is not None and biggest_loser.id == db_user.id:
                 name = f"[31m{name}[0m"
             lord_time_min = round(float(db_user.lord_time)/60, 2)
-            user_data = [name, lord_time_min, db_user.win_count, db_user.loss_count, db_user.hopped_goo]
+            user_data = [name, lord_time_min, db_user.win_count, db_user.loss_count, db_user.hopped_goo, db_user.loss_streak]
             data.append(user_data)
         
         table_str = tabulate(data, headers)
