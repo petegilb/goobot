@@ -175,7 +175,7 @@ class Goo(commands.Cog):
                 }
 
                 await update_user(pool, old_lord.id, old_lord_updates)
-                response = f"{response}\nthe last goo lord was <@{current_lord.id}>. they were lord for {round(float(old_lord_lord_time)/60, ndigits=2)} minutes(s)."
+                response = f"{response}\nthe last goo lord was <@{current_lord.id}>. they were lord for {round(float(reign_time)/60, ndigits=2)} minutes(s)."
             
             await ctx.send(response)
         else:
@@ -186,10 +186,11 @@ class Goo(commands.Cog):
             await ctx.send(response)
             # check for biggest loser!
             biggest_loser = await get_biggest_loser(pool, stats)
-            if biggest_loser and stats.biggest_loser_count < updates['loss_count'] and biggest_loser.id != member.id:
+            if biggest_loser and stats.biggest_loser_count < updates['loss_count']:
                 await set_biggest_loser(pool, member.id, updates['loss_count'])
-                response = BIGGEST_LOSER_MESSAGE.format(updates['loss_count'], biggest_loser.id, biggest_loser.loss_count)
-                await ctx.send(response)
+                if biggest_loser.id != member.id:
+                    response = BIGGEST_LOSER_MESSAGE.format(updates['loss_count'], biggest_loser.id, stats.biggest_loser_count)
+                    await ctx.send(response)
             if biggest_loser is None:
                 logger.debug("setting first biggest loser")
                 await set_biggest_loser(pool, member.id, updates['loss_count'])
