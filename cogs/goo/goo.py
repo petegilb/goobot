@@ -184,13 +184,13 @@ class Goo(commands.Cog):
             await ctx.send(response)
             # check for biggest loser!
             biggest_loser = await get_biggest_loser(pool, stats)
-            if biggest_loser and biggest_loser.loss_count < updates['loss_count'] and biggest_loser.id != member.id:
-                await set_biggest_loser(pool, member.id)
+            if biggest_loser and stats.biggest_loser_count < updates['loss_count'] and biggest_loser.id != member.id:
+                await set_biggest_loser(pool, member.id, updates['loss_count'])
                 response = BIGGEST_LOSER_MESSAGE.format(updates['loss_count'], biggest_loser.id, biggest_loser.loss_count)
                 await ctx.send(response)
             if biggest_loser is None:
                 logger.debug("setting first biggest loser")
-                await set_biggest_loser(pool, member.id)
+                await set_biggest_loser(pool, member.id, updates['loss_count'])
             
             # send to goo jail if 1 percent chance is hit
             roll = random.randint(1, 100)
@@ -316,7 +316,8 @@ class Goo(commands.Cog):
     @commands.command()
     @commands.check(is_goo_channel)
     async def gooloser(self, ctx: commands.Context, *, member: discord.Member = None):
-        biggest_loser = await get_biggest_loser(self.bot.db_pool)
+        stats = await get_stats(self.bot.db_pool)
+        biggest_loser = await get_biggest_loser(self.bot.db_pool, stats)
         if biggest_loser is None:
             await ctx.reply("Nobody is the biggest loser yet! Let's see some goo hopping, peasant!")
         discord_loser = ctx.guild.get_member(biggest_loser.id)
@@ -325,7 +326,7 @@ class Goo(commands.Cog):
         
         name = discord_loser.display_name
         loser_str = "The goo loser record is held by {0} with the most unsuccessful attempts to overthrow the goo lord. They attempted {1} time(s)."
-        await ctx.reply(loser_str.format(name, biggest_loser.loss_count))
+        await ctx.reply(loser_str.format(name, stats.biggest_loser_count))
 
     @commands.command()
     @commands.check(is_goo_channel)
@@ -342,7 +343,6 @@ class Goo(commands.Cog):
         await ctx.reply(lord_str)
 
     @commands.command()
-    @commands.check(is_goo_channel)
     async def gooball(self, ctx: commands.Context, *, member: discord.Member = None):
         embed=discord.Embed(title="GOOOOOOB", color=0xb0ff70)
         embed.set_image(url=f"https://c.tenor.com/UCkUaBYlktkAAAAC/tenor.gif")

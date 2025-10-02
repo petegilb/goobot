@@ -18,12 +18,16 @@ CREATE TABLE IF NOT EXISTS stats (
     last_winner_at    TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    biggest_loser_id    BIGINT REFERENCES users(id)
+    biggest_loser_id    BIGINT REFERENCES users(id),
+    biggest_loser_count    BIGINT NOT NULL DEFAULT 0
 );
 -- ensure the single row exists:
 INSERT INTO stats (id) VALUES (1)
 ON CONFLICT (id) DO NOTHING;
 """
+
+# ALTER TABLE stats ADD COLUMN biggest_loser_count BIGINT NOT NULL DEFAULT 0;
+# UPDATE stats SET biggest_loser_count = 16 WHERE id = 1;
 
 class Stat(BaseModel):
     """
@@ -35,6 +39,7 @@ class Stat(BaseModel):
     created_at: datetime
     updated_at: datetime
     biggest_loser_id: int|None
+    biggest_loser_count: int
 
 async def get_stats(pool: asyncpg.Pool) -> Stat:
     async with pool.acquire() as connection:
@@ -52,9 +57,10 @@ async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: dateti
     await update_fields(pool, 'stats', 1, updates)
 
 
-async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int):
+async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int, biggest_loser_count: int):
     updates = {
         'biggest_loser_id': biggest_loser_id,
+        'biggest_loser_count': biggest_loser_count,
         'updated_at': datetime.now()
     }
     await update_fields(pool, 'stats', 1, updates)
