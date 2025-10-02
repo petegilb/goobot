@@ -120,7 +120,7 @@ class Goo(commands.Cog):
     @commands.check(is_goo_channel)
     async def hopinmygoo(self, ctx: commands.Context, *, member: discord.Member = None):
         member = member or ctx.author
-        name = member.nick if member.nick is not None else member.name
+        name = member.display_name
         response = "..."
         now = datetime.datetime.now()
 
@@ -240,7 +240,7 @@ class Goo(commands.Cog):
             reign_user = ctx.author
         
         current_goolord = await get_goolord(self.bot.db_pool)
-        reign_user_name = reign_user.nick if reign_user.nick is not None else reign_user.name
+        reign_user_name = reign_user.display_name
 
         db_reign_user = await get_user(self.bot.db_pool, reign_user.id)
 
@@ -301,7 +301,7 @@ class Goo(commands.Cog):
             if user is None:
                 continue
             
-            name = user.nick if user.nick else user.name
+            name = user.display_name
             if current_goolord is not None and current_goolord.id == db_user.id:
                 name = f"[32m{name}[0m"
             elif biggest_loser is not None and biggest_loser.id == db_user.id:
@@ -323,7 +323,7 @@ class Goo(commands.Cog):
         if discord_loser is None:
             return
         
-        name = discord_loser.nick if discord_loser.nick else discord_loser.name
+        name = discord_loser.display_name
         loser_str = "The goo loser record is held by {0} with the most unsuccessful attempts to overthrow the goo lord. They attempted {1} time(s)."
         await ctx.reply(loser_str.format(name, biggest_loser.loss_count))
 
