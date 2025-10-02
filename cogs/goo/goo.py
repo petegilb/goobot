@@ -180,6 +180,8 @@ class Goo(commands.Cog):
             await ctx.send(response)
         else:
             updates['loss_count'] = user.loss_count + 1
+            if user.loss_streak < updates['loss_count']:
+                updates['loss_streak'] = updates['loss_count']
             response = LOSS_MESSAGE.format(name)
             await ctx.send(response)
             # check for biggest loser!

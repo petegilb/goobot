@@ -20,9 +20,12 @@ CREATE TABLE IF NOT EXISTS users (
     win_count BIGINT NOT NULL DEFAULT 0,
     loss_count BIGINT NOT NULL DEFAULT 0,
     lord_time BIGINT NOT NULL DEFAULT 0,
-    last_win TIMESTAMPTZ
+    last_win TIMESTAMPTZ,
+    loss_streak BIGINT NOT NULL DEFAULT 0
 );
 """
+
+# ALTER TABLE users ADD COLUMN loss_streak BIGINT NOT NULL DEFAULT 0;
 
 class User(BaseModel):
     id: int
@@ -33,6 +36,7 @@ class User(BaseModel):
     loss_count: int
     lord_time: int
     last_win: datetime|None
+    loss_streak: int
 
 async def init_user(pool: asyncpg.Pool, ctx: commands.Context, member: discord.Member = None) -> User:
     sql = """
