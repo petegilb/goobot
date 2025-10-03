@@ -340,8 +340,7 @@ class Goo(commands.Cog):
             return
         
         reign_time = datetime.datetime.now(tz=datetime.timezone.utc) - current_goolord.last_win
-        lord_time = current_goolord.lord_time + reign_time.total_seconds()
-        lord_time = round(float(lord_time)/60, 2)
+        lord_time = round(float(reign_time.total_seconds())/60, 2)
         lord_str = f"the current goo lord is <@{current_goolord.id}>. their current reign has been {lord_time} minute(s)."
         await ctx.reply(lord_str)
 
