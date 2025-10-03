@@ -175,7 +175,7 @@ class Goo(commands.Cog):
                 }
 
                 await update_user(pool, old_lord.id, old_lord_updates)
-                response = f"{response}\nthe last goo lord was <@{current_lord.id}>. they were lord for {round(float(reign_time)/60, ndigits=2)} minutes(s)."
+                response = f"{response}\nthe last goo lord was <@{current_lord.id}>. they were lord for {round(float(reign_time.total_seconds())/60, ndigits=2)} minutes(s)."
             
             await ctx.send(response)
         else:
