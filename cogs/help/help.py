@@ -173,12 +173,11 @@ class Help(commands.Cog):
 
     def game_summary(self, prefix: str) -> str:
         return (
-            "One throne, one goo lord, and everybody else plotting to take it.\n\n"
+            "Let us fight for the glory of the throne of goo.\n\n"
             f"`{prefix}hopinmygoo` is your repeatable roll at the crown. `{prefix}duel` is a much better "
             "shot but only once a day, and losing it puts you behind bars. Whoever is wearing the crown "
             f"can `{prefix}banish` a rival and `{prefix}decree` whatever they like.\n\n"
-            "The leaderboard ranks **total time on the throne**, not wins, so taking the crown is only "
-            "half of it. Holding it is the game."
+            "The leaderboard ranks **total time on the throne**, not wins."
         )
 
     @commands.command()
