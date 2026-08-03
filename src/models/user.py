@@ -16,11 +16,13 @@ CREATE TABLE IF NOT EXISTS users (
     loss_count BIGINT NOT NULL DEFAULT 0,
     lord_time BIGINT NOT NULL DEFAULT 0,
     last_win TIMESTAMPTZ,
-    loss_streak BIGINT NOT NULL DEFAULT 0
+    loss_streak BIGINT NOT NULL DEFAULT 0,
+    last_duel TIMESTAMPTZ
 );
 """
 
 # ALTER TABLE users ADD COLUMN loss_streak BIGINT NOT NULL DEFAULT 0;
+# ALTER TABLE users ADD COLUMN last_duel TIMESTAMPTZ;
 
 class User(BaseModel):
     id: int
@@ -32,6 +34,7 @@ class User(BaseModel):
     lord_time: int
     last_win: datetime|None
     loss_streak: int
+    last_duel: datetime|None
 
 async def init_user(pool: asyncpg.Pool, member: discord.Member) -> User|None:
     sql = """
@@ -95,6 +98,24 @@ async def record_loss(pool: asyncpg.Pool, id:int, username:str) -> User|None:
         conn : asyncpg.connection.Connection = connection
         async with conn.transaction():
             row = await conn.fetchrow(sql, id, username)
+            return User.model_validate(dict(row)) if row else None
+
+async def claim_daily_duel(pool: asyncpg.Pool, id:int, now: datetime, earliest_allowed: datetime) -> User|None:
+    """
+    Claims today's duel, returning None if one was already used inside the window.
+    Conditional in SQL so two duels fired at once cannot both claim the same day.
+    """
+    sql = """
+    UPDATE users
+        SET last_duel = $2
+        WHERE id = $1
+          AND (last_duel IS NULL OR last_duel <= $3)
+    RETURNING *;
+    """
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, id, now, earliest_allowed)
             return User.model_validate(dict(row)) if row else None
 
 async def update_user(pool: asyncpg.Pool, id:int, updates: Dict[str, Any]):

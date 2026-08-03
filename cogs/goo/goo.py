@@ -4,13 +4,13 @@ import logging
 import random
 import datetime
 import asyncio
-from typing import TYPE_CHECKING, List, Dict
+from typing import TYPE_CHECKING, List, Dict, NamedTuple
 
 import asyncpg
 import discord
 from tabulate import tabulate
 from discord.ext import commands, tasks
-from src.models.user import User, init_user, record_win, record_loss, update_user, get_user, get_all_users
+from src.models.user import User, init_user, record_win, record_loss, claim_daily_duel, update_user, get_user, get_all_users
 from src.models.stat import Stat, get_stats, set_goo_lord, set_biggest_loser, use_banish, set_decree
 
 if TYPE_CHECKING:
@@ -36,6 +36,9 @@ GOO_COOLDOWN = 180
 GOO_LONG_COOLDOWN_CHANCE = 1
 GOO_LONG_COOLDOWN = 60*60
 BANISH_DURATION = 60*60
+DUEL_CHANCE = 33
+DUEL_COOLDOWN = 24*60*60
+DUEL_LOSS_JAIL = 90*60
 DECREE_COOLDOWN = 300
 MAX_DECREE_LENGTH = 200
 # discord truncates a custom status past this
@@ -62,6 +65,10 @@ BIGGEST_LOSER_MESSAGE = """You have beaten the streak for most attempts to overt
 The previous loser was <@{1}> with {2} attempt(s)!"""
 BANISH_MESSAGE = "By decree of the goo lord, <@{0}> has been banished to goo jail for {1} minute(s)!"
 DECREE_MESSAGE = "📜 the goo lord has decreed:\n> {0}"
+DUEL_WIN_MESSAGE = """⚔️ {0} draws steel against the goo lord... and wins!
+the throne is taken by force!"""
+DUEL_LOSS_MESSAGE = """⚔️ {0} draws steel against the goo lord... and is struck down!
+the lord stands firm. to the goo jail with them for {1} minute(s)."""
 
 
 def utc_now() -> datetime.datetime:
@@ -79,6 +86,17 @@ def reign_seconds_since(last_win: datetime.datetime|None) -> float:
 
 def to_minutes(seconds: float) -> float:
     return round(float(seconds)/60, 2)
+
+
+def format_countdown(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return "less than a minute"
 
 
 def total_lord_seconds(db_user: User, current_goolord: User|None) -> float:
@@ -104,6 +122,12 @@ async def get_biggest_loser(pool: asyncpg.Pool, stats: Stat|None = None) -> User
 def is_goo_channel(ctx: commands.Context):
     return ctx.message.channel.id in GOO_CHANNELS
 
+
+class ConfigProblem(NamedTuple):
+    # 'error' means a feature is broken, 'warning' means it is degraded
+    severity: str
+    message: str
+
 class Goo(commands.Cog):
 
     def __init__(self, bot):
@@ -121,11 +145,116 @@ class Goo(commands.Cog):
             return None
         return self.bot.db_pool
 
+    def check_role(self, guild: discord.Guild, bot_member: discord.Member, role_id: int, label: str) -> List[ConfigProblem]:
+        role = guild.get_role(role_id)
+        if role is None:
+            return [ConfigProblem('error', f"{label} {role_id} does not exist in {guild.name}.")]
+
+        problems = []
+        if role.managed:
+            problems.append(ConfigProblem('error', f"{label} '{role.name}' is managed by an integration and can never be assigned."))
+        if role >= bot_member.top_role:
+            problems.append(ConfigProblem('error', f"{label} '{role.name}' sits at or above the bot's highest role, so the bot cannot assign it."))
+        return problems
+
+    def check_channel(self, guild: discord.Guild, bot_member: discord.Member, jail_role: discord.Role|None, channel_id: int) -> List[ConfigProblem]:
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            return [ConfigProblem('error', f"Goo channel {channel_id} does not exist, or the bot cannot see it.")]
+        if not isinstance(channel, discord.TextChannel):
+            return [ConfigProblem('error', f"Goo channel {channel_id} is not a text channel.")]
+        if channel.guild.id != guild.id:
+            return [ConfigProblem('error', f"Goo channel #{channel.name} belongs to a different server than GUILD_ID.")]
+
+        problems = []
+        permissions = channel.permissions_for(bot_member)
+        required = [('view_channel', 'View Channel'), ('send_messages', 'Send Messages'), ('embed_links', 'Embed Links')]
+        for attribute, label in required:
+            if not getattr(permissions, attribute):
+                problems.append(ConfigProblem('error', f"Missing {label} in #{channel.name}."))
+        if not permissions.manage_channels:
+            problems.append(ConfigProblem('warning', f"Missing Manage Channels in #{channel.name}, so !decree cannot set the topic."))
+
+        # goo jail only works because the role is denied the channel in discord
+        if jail_role is not None:
+            overwrite = channel.overwrites_for(jail_role)
+            if overwrite.view_channel is not False and overwrite.send_messages is not False:
+                problems.append(ConfigProblem('warning', f"The goo jail role does not deny access to #{channel.name}, so jailed players can still play."))
+        return problems
+
+    def verify_configuration(self) -> List[ConfigProblem]:
+        guild = self.bot.get_guild(GUILD_ID)
+        if guild is None:
+            return [ConfigProblem('error', f"GUILD_ID {GUILD_ID} not found. Is the bot invited to that server?")]
+
+        bot_member = guild.me
+        if bot_member is None:
+            return [ConfigProblem('error', f"Could not resolve the bot's own membership in {guild.name}.")]
+
+        problems = []
+        if not bot_member.guild_permissions.manage_roles:
+            problems.append(ConfigProblem('error', "Missing the Manage Roles permission, so no roles can be handed out at all."))
+
+        problems.extend(self.check_role(guild, bot_member, GOOLORD_ROLE_ID, 'GOOLORD_ROLE_ID'))
+        problems.extend(self.check_role(guild, bot_member, GOO_JAIL_ROLE_ID, 'GOO_JAIL_ROLE_ID'))
+
+        jail_role = guild.get_role(GOO_JAIL_ROLE_ID)
+        already_seen = set()
+        for channel_id in GOO_CHANNELS:
+            if channel_id in already_seen:
+                problems.append(ConfigProblem('warning', f"Channel {channel_id} is listed more than once in GOO_CHANNELS."))
+                continue
+            already_seen.add(channel_id)
+            problems.extend(self.check_channel(guild, bot_member, jail_role, channel_id))
+        return problems
+
+    def report_configuration(self) -> List[ConfigProblem]:
+        problems = self.verify_configuration()
+        errors = [problem for problem in problems if problem.severity == 'error']
+        warnings = [problem for problem in problems if problem.severity == 'warning']
+
+        for problem in errors:
+            logger.error(f"goo config: {problem.message}")
+        for problem in warnings:
+            logger.warning(f"goo config: {problem.message}")
+
+        if not problems:
+            logger.info("goo config: guild, channels, roles and permissions all check out")
+        else:
+            logger.error(f"goo config: {len(errors)} error(s) and {len(warnings)} warning(s), goo may not work correctly")
+        return problems
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def goocheck(self, ctx: commands.Context):
+        problems = self.report_configuration()
+        errors = [problem for problem in problems if problem.severity == 'error']
+        warnings = [problem for problem in problems if problem.severity == 'warning']
+
+        if not problems:
+            embed = discord.Embed(
+                title="Goo configuration is okay",
+                description="Guild, channels, roles and permissions all check out.",
+                color=0x39e81a,
+            )
+        else:
+            embed = discord.Embed(
+                title="Goo configuration has an error",
+                description=f"{len(errors)} error(s) and {len(warnings)} warning(s).",
+                color=0xe81a1a if errors else 0xe8a71a,
+            )
+            if errors:
+                embed.add_field(name="Broken", value="\n".join(f"• {problem.message}" for problem in errors)[:1024], inline=False)
+            if warnings:
+                embed.add_field(name="Degraded", value="\n".join(f"• {problem.message}" for problem in warnings)[:1024], inline=False)
+        await ctx.send(embed=embed)
+
     async def check_existing_goolord(self):
         """
         If the db has been reset, remove any existing goo lords!
         """
         await self.bot.wait_until_ready()
+        self.report_configuration()
         logger.info("Checking to see if there are any existing goo lords not in the db")
         pool = self.get_pool()
         if pool is None:
@@ -226,7 +355,7 @@ class Goo(commands.Cog):
         else:
             await self.handle_loss(ctx, pool, stats)
 
-    async def handle_win(self, ctx: commands.Context, pool: asyncpg.Pool, user: User, current_lord: User|None):
+    async def handle_win(self, ctx: commands.Context, pool: asyncpg.Pool, user: User, current_lord: User|None, opening: str|None = None):
         member = ctx.author
         name = member.display_name
         attempts_before_win = user.loss_count
@@ -237,7 +366,7 @@ class Goo(commands.Cog):
         await record_win(pool, member.id, name, now)
         await set_goo_lord(pool, member.id, now)
 
-        response = WIN_MESSAGE.format(name, attempts_before_win)
+        response = opening if opening is not None else WIN_MESSAGE.format(name, attempts_before_win)
 
         if current_lord is None:
             await ctx.send(f"You are the first one to rise up and lead the kingdom of goo! All hail the first goo lord, {name}!")
@@ -283,25 +412,73 @@ class Goo(commands.Cog):
         if previous_loser is not None and previous_loser.id != member.id:
             await ctx.send(BIGGEST_LOSER_MESSAGE.format(loss_count, previous_loser.id, stats.biggest_loser_count))
 
+    async def send_to_jail(self, guild: discord.Guild, member: discord.Member, duration: int) -> bool:
+        jail_role = guild.get_role(GOO_JAIL_ROLE_ID)
+        if jail_role is None:
+            logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
+            return False
+
+        self.bot.jail_counter[member.id] = utc_now() + datetime.timedelta(seconds=duration)
+        try:
+            await member.add_roles(jail_role)
+        except discord.HTTPException:
+            logger.exception(f"Failed to add the goo jail role to {member.id}")
+            self.bot.jail_counter.pop(member.id, None)
+            return False
+        return True
+
     async def maybe_send_to_jail(self, ctx: commands.Context):
         roll = random.randint(1, 100)
         if roll > GOO_LONG_COOLDOWN_CHANCE:
             return
 
-        goo_jail_role = ctx.guild.get_role(GOO_JAIL_ROLE_ID)
-        if goo_jail_role is None:
-            logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
+        if await self.send_to_jail(ctx.guild, ctx.author, GOO_LONG_COOLDOWN):
+            await ctx.reply(f"Your attempt to overthrow the lord has been thwarted. You have been sent to jail for {round(GOO_LONG_COOLDOWN / 60)} minutes!")
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def duel(self, ctx: commands.Context):
+        pool = self.get_pool()
+        if pool is None:
             return
 
         member = ctx.author
-        self.bot.jail_counter[member.id] = utc_now() + datetime.timedelta(seconds=GOO_LONG_COOLDOWN)
-        try:
-            await member.add_roles(goo_jail_role)
-        except discord.HTTPException:
-            logger.exception(f"Failed to add the goo jail role to {member.id}")
-            self.bot.jail_counter.pop(member.id, None)
+        name = member.display_name
+        user = await init_user(pool, member)
+
+        stats = await get_stats(pool)
+        if stats is None:
+            logger.error("the stats row is missing")
             return
-        await ctx.reply(f"Your attempt to overthrow the lord has been thwarted. You have been sent to jail for {round(GOO_LONG_COOLDOWN / 60)} minutes!")
+
+        # nothing below here should be reachable without a lord to fight
+        current_lord = await get_goolord(pool, stats)
+        if current_lord is None:
+            await ctx.reply("There is no goo lord to duel. The throne lies empty, go hop for it.")
+            return
+        if current_lord.id == member.id:
+            await ctx.reply("You are the goo lord. Duelling yourself would settle nothing.")
+            return
+
+        now = utc_now()
+        earliest_allowed = now - datetime.timedelta(seconds=DUEL_COOLDOWN)
+        # the daily is claimed before the roll so a double invocation cannot duel twice
+        claimed = await claim_daily_duel(pool, member.id, now, earliest_allowed)
+        if claimed is None:
+            remaining = DUEL_COOLDOWN - (now - user.last_duel).total_seconds() if user.last_duel else DUEL_COOLDOWN
+            await ctx.reply(f"You have already duelled today, {name}. Sharpen your blade and return in {format_countdown(remaining)}.")
+            return
+
+        roll = random.randint(1, 100)
+        if roll <= DUEL_CHANCE:
+            await self.handle_win(ctx, pool, claimed, current_lord, opening=DUEL_WIN_MESSAGE.format(name))
+            return
+
+        loser = await record_loss(pool, member.id, name)
+        await ctx.send(DUEL_LOSS_MESSAGE.format(name, round(DUEL_LOSS_JAIL / 60)))
+        if loser is not None:
+            await self.check_biggest_loser(ctx, pool, stats, loser.loss_count)
+        await self.send_to_jail(ctx.guild, member, DUEL_LOSS_JAIL)
 
     async def require_goolord(self, ctx: commands.Context, pool: asyncpg.Pool) -> User|None:
         current_lord = await get_goolord(pool)
