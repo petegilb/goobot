@@ -106,6 +106,10 @@ class GooBot(commands.Bot):
         if isinstance(exception, (commands.CheckFailure, commands.CommandNotFound)):
             return
 
+        if isinstance(exception, commands.BadArgument):
+            await ctx.reply("I couldn't find that user.", delete_after=10)
+            return
+
         return await super().on_command_error(ctx, exception)
 
 client = GooBot(command_prefix="!", help_command=None, intents=intents)

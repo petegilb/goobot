@@ -11,7 +11,7 @@ import discord
 from tabulate import tabulate
 from discord.ext import commands, tasks
 from src.models.user import User, init_user, record_win, record_loss, update_user, get_user, get_all_users
-from src.models.stat import Stat, get_stats, set_goo_lord, set_biggest_loser
+from src.models.stat import Stat, get_stats, set_goo_lord, set_biggest_loser, use_banish, set_decree
 
 if TYPE_CHECKING:
     from main import GooBot
@@ -35,6 +35,12 @@ GOO_CHANCE = 5
 GOO_COOLDOWN = 180
 GOO_LONG_COOLDOWN_CHANCE = 1
 GOO_LONG_COOLDOWN = 60*60
+BANISH_DURATION = 60*60
+DECREE_COOLDOWN = 300
+MAX_DECREE_LENGTH = 200
+# discord truncates a custom status past this
+MAX_STATUS_LENGTH = 128
+MAX_TOPIC_LENGTH = 1024
 GOOLORD_ROLE_ID = require_id_env('GOOLORD_ROLE_ID')
 GOO_JAIL_ROLE_ID = require_id_env('GOO_JAIL_ROLE_ID')
 GUILD_ID = require_id_env('GUILD_ID')
@@ -54,6 +60,8 @@ a new goo lord has been declared!! they attempted to overthrow the lord {1} time
 BIGGEST_LOSER_MESSAGE = """You have beaten the streak for most attempts to overthrow the goo lord without success with {0} attempt(s)!
 
 The previous loser was <@{1}> with {2} attempt(s)!"""
+BANISH_MESSAGE = "By decree of the goo lord, <@{0}> has been banished to goo jail for {1} minute(s)!"
+DECREE_MESSAGE = "📜 the goo lord has decreed:\n> {0}"
 
 
 def utc_now() -> datetime.datetime:
@@ -122,6 +130,11 @@ class Goo(commands.Cog):
         pool = self.get_pool()
         if pool is None:
             return
+
+        # the channel topic survives a restart on its own, the bot status does not
+        stats = await get_stats(pool)
+        if stats is not None and stats.decree:
+            await self.set_decree_status(stats.decree)
 
         guild = self.bot.get_guild(GUILD_ID)
         channel = self.bot.get_channel(GOO_CHANNELS[0])
@@ -289,6 +302,111 @@ class Goo(commands.Cog):
             self.bot.jail_counter.pop(member.id, None)
             return
         await ctx.reply(f"Your attempt to overthrow the lord has been thwarted. You have been sent to jail for {round(GOO_LONG_COOLDOWN / 60)} minutes!")
+
+    async def require_goolord(self, ctx: commands.Context, pool: asyncpg.Pool) -> User|None:
+        current_lord = await get_goolord(pool)
+        if current_lord is None:
+            await ctx.reply("The throne lies empty. Only a goo lord may do that.")
+            return None
+        if current_lord.id != ctx.author.id:
+            await ctx.reply(f"Only the goo lord may do that, peasant. Kneel before <@{current_lord.id}>.")
+            return None
+        return current_lord
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def banish(self, ctx: commands.Context, *, member: discord.Member = None):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        stats = await get_stats(pool)
+        if stats is None:
+            logger.error("the stats row is missing")
+            return
+        if await self.require_goolord(ctx, pool) is None:
+            return
+        if stats.banish_used:
+            await ctx.reply("You have already banished someone this reign. Even a goo lord has limits.")
+            return
+
+        if member is None:
+            await ctx.reply("Banish which peasant? Try `!banish @someone`")
+            return
+        if member.id == ctx.author.id:
+            await ctx.reply("Banishing yourself would be a strange way to rule.")
+            return
+        if member.bot:
+            await ctx.reply("You cannot banish a machine.")
+            return
+
+        jail_role = ctx.guild.get_role(GOO_JAIL_ROLE_ID)
+        if jail_role is None:
+            logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
+            await ctx.reply("The goo jail seems to have vanished. Tell an admin.")
+            return
+        if jail_role in member.roles:
+            await ctx.reply(f"{member.display_name} is already rotting in goo jail.")
+            return
+
+        self.bot.jail_counter[member.id] = utc_now() + datetime.timedelta(seconds=BANISH_DURATION)
+        try:
+            await member.add_roles(jail_role)
+        except discord.HTTPException:
+            logger.exception(f"Failed to banish {member.id}")
+            self.bot.jail_counter.pop(member.id, None)
+            await ctx.reply("The banishment failed. Perhaps they are beyond your reach.")
+            return
+
+        # only spent once the banishment actually landed
+        await use_banish(pool)
+        await ctx.send(BANISH_MESSAGE.format(member.id, round(BANISH_DURATION / 60)))
+
+    @commands.cooldown(1, DECREE_COOLDOWN, commands.BucketType.channel)
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def decree(self, ctx: commands.Context, *, text: str = None):
+        pool = self.get_pool()
+        if pool is None:
+            ctx.command.reset_cooldown(ctx)
+            return
+
+        if await self.require_goolord(ctx, pool) is None:
+            ctx.command.reset_cooldown(ctx)
+            return
+
+        text = (text or "").strip()
+        if not text:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reply("A decree needs words. Try `!decree <your proclamation>`")
+            return
+        if len(text) > MAX_DECREE_LENGTH:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reply(f"That decree runs long. Keep it under {MAX_DECREE_LENGTH} characters.")
+            return
+
+        await set_decree(pool, text)
+        await self.set_decree_status(text)
+        await self.set_decree_topic(ctx.channel, text)
+        await ctx.send(DECREE_MESSAGE.format(text))
+
+    async def set_decree_status(self, text: str):
+        try:
+            await self.bot.change_presence(
+                status=discord.Status.online,
+                activity=discord.CustomActivity(name=text[:MAX_STATUS_LENGTH])
+            )
+        except discord.HTTPException:
+            logger.exception("Failed to set the bot status from the decree")
+
+    async def set_decree_topic(self, channel: discord.abc.GuildChannel, text: str):
+        # channel topic edits are heavily rate limited, hence the command cooldown
+        try:
+            await channel.edit(topic=text[:MAX_TOPIC_LENGTH])
+        except discord.Forbidden:
+            logger.error("Missing Manage Channels, cannot set the goo channel topic")
+        except discord.HTTPException:
+            logger.exception("Failed to set the goo channel topic from the decree")
 
     @commands.command()
     @commands.check(is_goo_channel)
