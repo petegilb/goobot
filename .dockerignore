@@ -1,0 +1,15 @@
+# the postgres bind mount from docker-compose, owned by the postgres user
+# and unreadable by the build. it must never enter the build context.
+db/
+
+.git/
+.venv/
+__pycache__/
+*.pyc
+
+# compose injects these at runtime via env_file, they are never baked into the image
+.env
+
+discord.log*
+mc_icon.png
+.vscode/
