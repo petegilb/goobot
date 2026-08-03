@@ -1,14 +1,24 @@
 import logging
-from datetime import datetime
+import re
 from typing import List, Dict, Any
 
 import asyncpg
-import discord
-from discord.ext import commands
 
 ALL_TABLES: List[str] = ['stats', 'users']
 
 logger = logging.getLogger('discord')
+
+SQL_IDENTIFIER_PATTERN = re.compile(r'^[a-z_][a-z0-9_]*$')
+
+
+def check_sql_identifier(name: str):
+    """
+    Table and column names cannot be passed as query parameters, so they are
+    interpolated into the SQL. Reject anything that is not a plain identifier.
+    """
+    if not SQL_IDENTIFIER_PATTERN.match(name):
+        raise ValueError(f"unsafe sql identifier: {name}")
+
 
 async def init_tables(pool: asyncpg.Pool):
     from src.models.user import CREATE_USER_TABLE_SQL
@@ -22,13 +32,18 @@ async def init_tables(pool: asyncpg.Pool):
 
 
 async def update_fields(pool: asyncpg.Pool, table:str, id:int, updates: Dict[str, Any]):
+    if not updates:
+        return
+
+    check_sql_identifier(table)
     set_clauses = []
     params = []
-    i = 2
+    placeholder_index = 2
     for key in updates.keys():
-        set_clauses.append(f"{key} = ${i}")
+        check_sql_identifier(key)
+        set_clauses.append(f"{key} = ${placeholder_index}")
         params.append(updates[key])
-        i+=1
+        placeholder_index += 1
     set_sql = ", ".join(set_clauses)
     sql = f"""
     UPDATE {table}
@@ -42,10 +57,13 @@ async def update_fields(pool: asyncpg.Pool, table:str, id:int, updates: Dict[str
         async with conn.transaction():
             await conn.execute(sql, id, *params)
 
+
 async def increment_field(pool: asyncpg.Pool, table:str, id:int, field: str, delta:int=1):
+    check_sql_identifier(table)
+    check_sql_identifier(field)
     sql = f"""
     UPDATE {table}
-        SET {field} = {field} + $2,
+        SET {field} = {field} + $2
         WHERE id = $1
     RETURNING *;
     """

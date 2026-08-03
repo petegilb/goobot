@@ -1,15 +1,8 @@
 from pydantic import BaseModel
-from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from datetime import datetime, timezone
 
 import asyncpg
-import discord
-from discord.ext import commands
 from src.util import update_fields
-
-if TYPE_CHECKING:
-    # from discord.ext.commands._types import BotT
-    from main import GooBot
 
 CREATE_STAT_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS stats (
@@ -41,14 +34,14 @@ class Stat(BaseModel):
     biggest_loser_id: int|None
     biggest_loser_count: int
 
-async def get_stats(pool: asyncpg.Pool) -> Stat:
+async def get_stats(pool: asyncpg.Pool) -> Stat|None:
     async with pool.acquire() as connection:
         conn : asyncpg.connection.Connection = connection
         async with conn.transaction():
             row = await conn.fetchrow("SELECT * FROM stats")
             return Stat.model_validate(dict(row)) if row else None
 
-async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: datetime, ctx: commands.Context):
+async def set_goo_lord(pool: asyncpg.Pool, last_winner_id: int, win_time: datetime):
     updates = {
         'last_winner_id': last_winner_id,
         'last_winner_at': win_time,
@@ -61,6 +54,6 @@ async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int, biggest_l
     updates = {
         'biggest_loser_id': biggest_loser_id,
         'biggest_loser_count': biggest_loser_count,
-        'updated_at': datetime.now()
+        'updated_at': datetime.now(tz=timezone.utc)
     }
     await update_fields(pool, 'stats', 1, updates)

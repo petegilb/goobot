@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 import discord
 from discord.ext import commands
-from src.util import init_tables, ALL_TABLES
+from src.util import init_tables, check_sql_identifier, ALL_TABLES
 
 if TYPE_CHECKING:
     # from discord.ext.commands._types import BotT
@@ -22,11 +22,18 @@ class Admin(commands.Cog):
     async def clear_db(self, ctx: commands.Context):
         logger.warning("Dropping all db tables!")
         pool = self.bot.db_pool
+        if pool is None or pool.is_closing():
+            logger.error("db pool doesn't exist or is closing")
+            return
+
         async with pool.acquire() as connection:
             conn : asyncpg.connection.Connection = connection
-            for table in ALL_TABLES:
-                await conn.execute(f"DROP TABLE {table};")
+            async with conn.transaction():
+                for table in ALL_TABLES:
+                    check_sql_identifier(table)
+                    await conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE;")
         await init_tables(pool)
+        self.bot.jail_counter.clear()
         await ctx.send("DB RESET!")
 
     @commands.hybrid_command(

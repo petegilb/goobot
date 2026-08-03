@@ -1,15 +1,10 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING, Dict, Any, List
+from typing import Dict, Any, List
 
 import asyncpg
 import discord
-from discord.ext import commands
 from src.util import update_fields, increment_field
-
-if TYPE_CHECKING:
-    # from discord.ext.commands._types import BotT
-    from main import GooBot
 
 CREATE_USER_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -38,7 +33,7 @@ class User(BaseModel):
     last_win: datetime|None
     loss_streak: int
 
-async def init_user(pool: asyncpg.Pool, ctx: commands.Context, member: discord.Member = None) -> User:
+async def init_user(pool: asyncpg.Pool, member: discord.Member) -> User|None:
     sql = """
     INSERT INTO users (id, username)
     VALUES ($1, $2)
@@ -49,7 +44,7 @@ async def init_user(pool: asyncpg.Pool, ctx: commands.Context, member: discord.M
     async with pool.acquire() as connection:
         conn : asyncpg.connection.Connection = connection
         async with conn.transaction():
-            row = await conn.fetchrow(sql, ctx.author.id, ctx.author.name)
+            row = await conn.fetchrow(sql, member.id, member.display_name)
             return User.model_validate(dict(row)) if row else None
 
 async def get_user(pool: asyncpg.Pool, id:int) -> User|None:
@@ -58,13 +53,49 @@ async def get_user(pool: asyncpg.Pool, id:int) -> User|None:
         async with conn.transaction():
             row = await conn.fetchrow("SELECT * FROM users WHERE id=$1;", id)
             return User.model_validate(dict(row)) if row else None
-        
+
 async def get_all_users(pool: asyncpg.Pool) -> List[User]:
     async with pool.acquire() as connection:
         conn : asyncpg.connection.Connection = connection
         async with conn.transaction():
             db_users = await conn.fetch("SELECT * FROM users;")
             return [User.model_validate(dict(row)) for row in db_users]
+
+async def record_win(pool: asyncpg.Pool, id:int, username:str, win_time: datetime) -> User|None:
+    """
+    Counters are incremented in SQL so simultaneous hops cannot overwrite each other.
+    """
+    sql = """
+    UPDATE users
+        SET hopped_goo = hopped_goo + 1,
+            win_count = win_count + 1,
+            loss_count = 0,
+            last_win = $2,
+            username = $3
+        WHERE id = $1
+    RETURNING *;
+    """
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, id, win_time, username)
+            return User.model_validate(dict(row)) if row else None
+
+async def record_loss(pool: asyncpg.Pool, id:int, username:str) -> User|None:
+    sql = """
+    UPDATE users
+        SET hopped_goo = hopped_goo + 1,
+            loss_count = loss_count + 1,
+            loss_streak = GREATEST(loss_streak, loss_count + 1),
+            username = $2
+        WHERE id = $1
+    RETURNING *;
+    """
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, id, username)
+            return User.model_validate(dict(row)) if row else None
 
 async def update_user(pool: asyncpg.Pool, id:int, updates: Dict[str, Any]):
     await update_fields(pool, 'users', id, updates)
