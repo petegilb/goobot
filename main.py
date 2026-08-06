@@ -1,14 +1,13 @@
 import os
 import logging
 import logging.handlers
-from datetime import datetime
-from typing import Dict
 from dotenv import load_dotenv
 
 import aiohttp
 import discord
 from discord.ext import commands
 import asyncpg
+from src.jail import JailCounter
 from src.util import init_tables
 
 load_dotenv()
@@ -52,7 +51,7 @@ class GooBot(commands.Bot):
         super().__init__(**kwargs)
         self.db_pool: asyncpg.Pool | None = None
         self.http_session: aiohttp.ClientSession | None = None
-        self.jail_counter: Dict[int, datetime] = {}
+        self.jail_counter: JailCounter = {}
 
     async def setup_hook(self):
         self.db_pool = await asyncpg.create_pool(

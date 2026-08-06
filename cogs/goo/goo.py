@@ -4,12 +4,13 @@ import logging
 import random
 import datetime
 import asyncio
-from typing import TYPE_CHECKING, List, Dict, NamedTuple
+from typing import TYPE_CHECKING, List, Dict, NamedTuple, Set, Tuple
 
 import asyncpg
 import discord
 from tabulate import tabulate
 from discord.ext import commands, tasks
+from src.jail import JailSentence
 from src.models.user import User, init_user, record_win, record_loss, claim_daily_duel, update_user, get_user, get_all_users
 from src.models.stat import Stat, get_stats, set_goo_lord, set_biggest_loser, use_banish, set_decree
 
@@ -30,6 +31,13 @@ def require_id_env(name: str) -> int:
     return int(value.strip())
 
 
+def optional_id_env(name: str) -> int|None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return int(value.strip())
+
+
 GOO_CHANNELS = parse_id_list(os.getenv('GOO_CHANNELS', ''))
 GOO_CHANCE = 5
 GOO_COOLDOWN = 180
@@ -41,11 +49,18 @@ DUEL_COOLDOWN = 24*60*60
 DUEL_LOSS_JAIL = 90*60
 DECREE_COOLDOWN = 300
 MAX_DECREE_LENGTH = 200
+JAILBREAK_MIN_CHANCE = 1
+JAILBREAK_MAX_CHANCE = 10
+JAILBREAK_FOLLOW_CHANCE = 50
+JAILBREAK_COOLDOWN = 5*60
+JAILBREAK_PENALTY = 10*60
 # discord truncates a custom status past this
 MAX_STATUS_LENGTH = 128
 MAX_TOPIC_LENGTH = 1024
 GOOLORD_ROLE_ID = require_id_env('GOOLORD_ROLE_ID')
 GOO_JAIL_ROLE_ID = require_id_env('GOO_JAIL_ROLE_ID')
+GOO_JAIL_CHANNEL_ID = require_id_env('GOO_JAIL_CHANNEL_ID')
+GENERAL_CHANNEL_ID = optional_id_env('GENERAL_CHANNEL_ID')
 GUILD_ID = require_id_env('GUILD_ID')
 
 if not GOO_CHANNELS:
@@ -69,6 +84,14 @@ DUEL_WIN_MESSAGE = """⚔️ {0} draws steel against the goo lord... and wins!
 the throne is taken by force!"""
 DUEL_LOSS_MESSAGE = """⚔️ {0} draws steel against the goo lord... and is struck down!
 the lord stands firm. to the goo jail with them for {1} minute(s)."""
+JAILBREAK_FAIL_MESSAGE = "you throw yourself at the bars and bounce off. ({0}% chance, {1} of your sentence left)"
+JAILBREAK_OPEN_MESSAGE = "🔓 **JAILBREAK** 🔓\n<@{0}> works the lock loose and slips into the night!"
+JAILBREAK_FOLLOW_MESSAGE = "> <@{0}> ({1} left to serve) bolts through the open door behind them!"
+JAILBREAK_CAUGHT_MESSAGE = "> <@{0}> ({1} left to serve) is dragged back by the guards. the jail is secured."
+JAILBREAK_EMPTY_MESSAGE = "the cells behind them are empty. nobody else was there for the ride."
+JAILBREAK_CLEARED_MESSAGE = "the goo jail stands empty. every last prisoner is loose."
+JAILBREAK_PENALTY_MESSAGE = "{0} prisoner(s) stay behind, and earn {1} more minute(s) for the trouble."
+JAILBREAK_ANNOUNCE_MESSAGE = "🔓 word reaches the kingdom of goo: {0} broke out of goo jail!"
 
 
 def utc_now() -> datetime.datetime:
@@ -123,6 +146,15 @@ def is_goo_channel(ctx: commands.Context):
     return ctx.message.channel.id in GOO_CHANNELS
 
 
+def is_jail_channel(ctx: commands.Context):
+    return ctx.message.channel.id == GOO_JAIL_CHANNEL_ID
+
+
+def jailbreak_chance(sentence: JailSentence, now: datetime.datetime) -> int:
+    span = JAILBREAK_MAX_CHANCE - JAILBREAK_MIN_CHANCE
+    return round(JAILBREAK_MIN_CHANCE + span * sentence.fraction_remaining(now))
+
+
 class ConfigProblem(NamedTuple):
     # 'error' means a feature is broken, 'warning' means it is degraded
     severity: str
@@ -157,22 +189,32 @@ class Goo(commands.Cog):
             problems.append(ConfigProblem('error', f"{label} '{role.name}' sits at or above the bot's highest role, so the bot cannot assign it."))
         return problems
 
-    def check_channel(self, guild: discord.Guild, bot_member: discord.Member, jail_role: discord.Role|None, channel_id: int) -> List[ConfigProblem]:
+    def resolve_channel(self, guild: discord.Guild, channel_id: int, label: str) -> Tuple[discord.TextChannel|None, List[ConfigProblem]]:
         channel = self.bot.get_channel(channel_id)
         if channel is None:
-            return [ConfigProblem('error', f"Goo channel {channel_id} does not exist, or the bot cannot see it.")]
+            return None, [ConfigProblem('error', f"{label} {channel_id} does not exist, or the bot cannot see it.")]
         if not isinstance(channel, discord.TextChannel):
-            return [ConfigProblem('error', f"Goo channel {channel_id} is not a text channel.")]
+            return None, [ConfigProblem('error', f"{label} {channel_id} is not a text channel.")]
         if channel.guild.id != guild.id:
-            return [ConfigProblem('error', f"Goo channel #{channel.name} belongs to a different server than GUILD_ID.")]
+            return None, [ConfigProblem('error', f"{label} #{channel.name} belongs to a different server than GUILD_ID.")]
+        return channel, []
 
-        problems = []
+    def check_bot_can_post(self, channel: discord.TextChannel, bot_member: discord.Member) -> List[ConfigProblem]:
         permissions = channel.permissions_for(bot_member)
         required = [('view_channel', 'View Channel'), ('send_messages', 'Send Messages'), ('embed_links', 'Embed Links')]
-        for attribute, label in required:
-            if not getattr(permissions, attribute):
-                problems.append(ConfigProblem('error', f"Missing {label} in #{channel.name}."))
-        if not permissions.manage_channels:
+        return [
+            ConfigProblem('error', f"Missing {label} in #{channel.name}.")
+            for attribute, label in required
+            if not getattr(permissions, attribute)
+        ]
+
+    def check_channel(self, guild: discord.Guild, bot_member: discord.Member, jail_role: discord.Role|None, channel_id: int) -> List[ConfigProblem]:
+        channel, problems = self.resolve_channel(guild, channel_id, 'Goo channel')
+        if channel is None:
+            return problems
+
+        problems.extend(self.check_bot_can_post(channel, bot_member))
+        if not channel.permissions_for(bot_member).manage_channels:
             problems.append(ConfigProblem('warning', f"Missing Manage Channels in #{channel.name}, so !decree cannot set the topic."))
 
         # goo jail only works because the role is denied the channel in discord
@@ -180,6 +222,32 @@ class Goo(commands.Cog):
             overwrite = channel.overwrites_for(jail_role)
             if overwrite.view_channel is not False and overwrite.send_messages is not False:
                 problems.append(ConfigProblem('warning', f"The goo jail role does not deny access to #{channel.name}, so jailed players can still play."))
+        return problems
+
+    def check_jail_channel(self, guild: discord.Guild, bot_member: discord.Member, jail_role: discord.Role|None) -> List[ConfigProblem]:
+        channel, problems = self.resolve_channel(guild, GOO_JAIL_CHANNEL_ID, 'GOO_JAIL_CHANNEL_ID')
+        if channel is None:
+            return problems
+
+        problems.extend(self.check_bot_can_post(channel, bot_member))
+        if channel.id in GOO_CHANNELS:
+            problems.append(ConfigProblem('error', f"#{channel.name} is both the goo jail channel and a goo channel, so jailed players can still play."))
+
+        # prisoners can only call !jailbreak if the jail role can talk in there
+        if jail_role is not None:
+            overwrite = channel.overwrites_for(jail_role)
+            if overwrite.view_channel is not True or overwrite.send_messages is not True:
+                problems.append(ConfigProblem('warning', f"The goo jail role is not explicitly allowed to talk in #{channel.name}, so prisoners may not be able to use !jailbreak."))
+        return problems
+
+    def check_general_channel(self, guild: discord.Guild, bot_member: discord.Member) -> List[ConfigProblem]:
+        if GENERAL_CHANNEL_ID is None:
+            return [ConfigProblem('warning', "GENERAL_CHANNEL_ID is not set, so decrees are only posted where they are made.")]
+
+        channel, problems = self.resolve_channel(guild, GENERAL_CHANNEL_ID, 'GENERAL_CHANNEL_ID')
+        if channel is None:
+            return problems
+        problems.extend(self.check_bot_can_post(channel, bot_member))
         return problems
 
     def verify_configuration(self) -> List[ConfigProblem]:
@@ -206,6 +274,9 @@ class Goo(commands.Cog):
                 continue
             already_seen.add(channel_id)
             problems.extend(self.check_channel(guild, bot_member, jail_role, channel_id))
+
+        problems.extend(self.check_jail_channel(guild, bot_member, jail_role))
+        problems.extend(self.check_general_channel(guild, bot_member))
         return problems
 
     def report_configuration(self) -> List[ConfigProblem]:
@@ -299,18 +370,14 @@ class Goo(commands.Cog):
         now = utc_now()
         # the role is the source of truth, so members who left the guild are skipped
         for member in list(jail_role.members):
-            release_at = self.bot.jail_counter.get(member.id)
-            if release_at is not None and release_at > now:
+            sentence = self.bot.jail_counter.get(member.id)
+            if sentence is not None and sentence.release_at > now:
                 continue
-            self.bot.jail_counter.pop(member.id, None)
-            try:
-                await member.remove_roles(jail_role)
-            except discord.HTTPException:
-                logger.exception(f"Failed to remove the goo jail role from {member.id}")
+            if not await self.release_from_jail(jail_role, member):
                 continue
             await channel.send(f"<@{member.id}>, you are now free from jail.")
 
-        expired = [user_id for user_id, release_at in self.bot.jail_counter.items() if release_at <= now]
+        expired = [user_id for user_id, sentence in self.bot.jail_counter.items() if sentence.release_at <= now]
         for user_id in expired:
             self.bot.jail_counter.pop(user_id, None)
 
@@ -418,13 +485,22 @@ class Goo(commands.Cog):
             logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
             return False
 
-        self.bot.jail_counter[member.id] = utc_now() + datetime.timedelta(seconds=duration)
+        self.bot.jail_counter[member.id] = JailSentence.begin(utc_now(), duration)
         try:
             await member.add_roles(jail_role)
         except discord.HTTPException:
             logger.exception(f"Failed to add the goo jail role to {member.id}")
             self.bot.jail_counter.pop(member.id, None)
             return False
+        return True
+
+    async def release_from_jail(self, jail_role: discord.Role, member: discord.Member) -> bool:
+        try:
+            await member.remove_roles(jail_role)
+        except discord.HTTPException:
+            logger.exception(f"Failed to remove the goo jail role from {member.id}")
+            return False
+        self.bot.jail_counter.pop(member.id, None)
         return True
 
     async def maybe_send_to_jail(self, ctx: commands.Context):
@@ -434,6 +510,98 @@ class Goo(commands.Cog):
 
         if await self.send_to_jail(ctx.guild, ctx.author, GOO_LONG_COOLDOWN):
             await ctx.reply(f"Your attempt to overthrow the lord has been thwarted. You have been sent to jail for {round(GOO_LONG_COOLDOWN / 60)} minutes!")
+
+    def prisoners_by_time_remaining(self, jail_role: discord.Role, now: datetime.datetime, exclude: Set[int]) -> List[Tuple[discord.Member, JailSentence]]:
+        prisoners = []
+        for member in jail_role.members:
+            if member.id in exclude:
+                continue
+            sentence = self.bot.jail_counter.get(member.id)
+            # anyone with no sentence left is on their way out already
+            if sentence is None or sentence.seconds_remaining(now) <= 0:
+                continue
+            prisoners.append((member, sentence))
+        prisoners.sort(key=lambda prisoner: prisoner[1].release_at, reverse=True)
+        return prisoners
+
+    def extend_sentences(self, member_ids: List[int], seconds: int):
+        for member_id in member_ids:
+            sentence = self.bot.jail_counter.get(member_id)
+            if sentence is not None:
+                self.bot.jail_counter[member_id] = sentence.extended_by(seconds)
+
+    @commands.cooldown(1, JAILBREAK_COOLDOWN, commands.BucketType.user)
+    @commands.command()
+    @commands.check(is_jail_channel)
+    async def jailbreak(self, ctx: commands.Context):
+        jail_role = ctx.guild.get_role(GOO_JAIL_ROLE_ID)
+        if jail_role is None:
+            ctx.command.reset_cooldown(ctx)
+            logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
+            await ctx.reply("The goo jail seems to have vanished. Tell an admin.")
+            return
+        if jail_role not in ctx.author.roles:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reply("You are not in goo jail. There is nothing for you to break out of.")
+            return
+
+        now = utc_now()
+        sentence = self.bot.jail_counter.get(ctx.author.id)
+        if sentence is None or sentence.seconds_remaining(now) <= 0:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reply("Your sentence is already served. Sit tight, the door opens on its own.")
+            return
+
+        chance = jailbreak_chance(sentence, now)
+        if random.randint(1, 100) > chance:
+            await ctx.reply(JAILBREAK_FAIL_MESSAGE.format(chance, format_countdown(sentence.seconds_remaining(now))))
+            return
+
+        if not await self.release_from_jail(jail_role, ctx.author):
+            ctx.command.reset_cooldown(ctx)
+            await ctx.reply("The lock gives, then holds. Something went wrong, try again.")
+            return
+
+        await self.cascade_jailbreak(ctx, jail_role, now)
+
+    async def cascade_jailbreak(self, ctx: commands.Context, jail_role: discord.Role, now: datetime.datetime):
+        escapees = [ctx.author]
+        lines = [JAILBREAK_OPEN_MESSAGE.format(ctx.author.id)]
+
+        # the angriest prisoner runs first, and the chain dies with the first failure
+        followers = self.prisoners_by_time_remaining(jail_role, now, {ctx.author.id})
+        broke_at = len(followers)
+        for index, (member, sentence) in enumerate(followers):
+            remaining = format_countdown(sentence.seconds_remaining(now))
+            escaped = random.randint(1, 100) <= JAILBREAK_FOLLOW_CHANCE and await self.release_from_jail(jail_role, member)
+            if not escaped:
+                lines.append(JAILBREAK_CAUGHT_MESSAGE.format(member.id, remaining))
+                broke_at = index
+                break
+            lines.append(JAILBREAK_FOLLOW_MESSAGE.format(member.id, remaining))
+            escapees.append(member)
+
+        left_behind = followers[broke_at:]
+        if not followers:
+            lines.append(JAILBREAK_EMPTY_MESSAGE)
+        elif not left_behind:
+            lines.append(JAILBREAK_CLEARED_MESSAGE)
+        else:
+            self.extend_sentences([member.id for member, _ in left_behind], JAILBREAK_PENALTY)
+            lines.append(JAILBREAK_PENALTY_MESSAGE.format(len(left_behind), round(JAILBREAK_PENALTY / 60)))
+
+        await ctx.send("\n".join(lines))
+        await self.announce_jailbreak(escapees)
+
+    async def announce_jailbreak(self, escapees: List[discord.Member]):
+        channel = self.bot.get_channel(GOO_CHANNELS[0])
+        if channel is None:
+            return
+        names = ", ".join(f"<@{member.id}>" for member in escapees)
+        try:
+            await channel.send(JAILBREAK_ANNOUNCE_MESSAGE.format(names))
+        except discord.HTTPException:
+            logger.exception("Failed to announce the jailbreak in the goo channel")
 
     @commands.command()
     @commands.check(is_goo_channel)
@@ -526,12 +694,7 @@ class Goo(commands.Cog):
             await ctx.reply(f"{member.display_name} is already rotting in goo jail.")
             return
 
-        self.bot.jail_counter[member.id] = utc_now() + datetime.timedelta(seconds=BANISH_DURATION)
-        try:
-            await member.add_roles(jail_role)
-        except discord.HTTPException:
-            logger.exception(f"Failed to banish {member.id}")
-            self.bot.jail_counter.pop(member.id, None)
+        if not await self.send_to_jail(ctx.guild, member, BANISH_DURATION):
             await ctx.reply("The banishment failed. Perhaps they are beyond your reach.")
             return
 
@@ -566,6 +729,25 @@ class Goo(commands.Cog):
         await self.set_decree_status(text)
         await self.set_decree_topic(ctx.channel, text)
         await ctx.send(DECREE_MESSAGE.format(text))
+        await self.broadcast_decree(ctx, text)
+
+    async def broadcast_decree(self, ctx: commands.Context, text: str):
+        if GENERAL_CHANNEL_ID is None:
+            return
+
+        channel = ctx.guild.get_channel(GENERAL_CHANNEL_ID)
+        if not isinstance(channel, discord.TextChannel):
+            logger.error(f"GENERAL_CHANNEL_ID {GENERAL_CHANNEL_ID} is not a text channel in this guild")
+            return
+        if channel.id == ctx.channel.id:
+            return
+
+        try:
+            await channel.send(DECREE_MESSAGE.format(text))
+        except discord.Forbidden:
+            await ctx.reply(f"I am not allowed to post in {channel.mention}, so the decree stayed here.")
+        except discord.HTTPException:
+            logger.exception("Failed to broadcast the decree")
 
     async def set_decree_status(self, text: str):
         try:

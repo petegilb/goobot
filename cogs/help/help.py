@@ -8,6 +8,8 @@ from cogs.goo.goo import (
     GOO_CHANCE, GOO_COOLDOWN, GOO_LONG_COOLDOWN, GOO_LONG_COOLDOWN_CHANCE,
     DUEL_CHANCE, DUEL_COOLDOWN, DUEL_LOSS_JAIL,
     BANISH_DURATION, DECREE_COOLDOWN, MAX_DECREE_LENGTH,
+    JAILBREAK_MIN_CHANCE, JAILBREAK_MAX_CHANCE, JAILBREAK_FOLLOW_CHANCE,
+    JAILBREAK_COOLDOWN, JAILBREAK_PENALTY,
 )
 
 if TYPE_CHECKING:
@@ -35,11 +37,12 @@ class HelpEntry(NamedTuple):
 
 THRONE = "Taking the throne"
 LORD = "Goo lord only"
+JAIL = "Behind bars"
 LOOKUP = "Looking things up"
 OTHER = "Everything else"
 ADMIN = "Admin"
 
-GROUP_ORDER = [THRONE, LORD, LOOKUP, OTHER, ADMIN]
+GROUP_ORDER = [THRONE, LORD, JAIL, LOOKUP, OTHER, ADMIN]
 
 HELP_ENTRIES: Dict[str, HelpEntry] = {
     'hopinmygoo': HelpEntry(
@@ -78,7 +81,7 @@ HELP_ENTRIES: Dict[str, HelpEntry] = {
     ),
     'decree': HelpEntry(
         usage="decree <your proclamation>",
-        summary="Set the bot status and the goo channel topic.",
+        summary="Proclaim to the whole server, and set the bot status and channel topic.",
         detail=(
             "Speak as the goo lord. Your words become the bot's status **and** the topic of the goo channel, "
             "so everyone sees them whether they are reading the chat or not.\n\n"
@@ -86,6 +89,22 @@ HELP_ENTRIES: Dict[str, HelpEntry] = {
             f"**{describe_duration(DECREE_COOLDOWN)}** because Discord rate limits topic changes hard.\n\n"
         ),
         group=LORD,
+    ),
+    'jailbreak': HelpEntry(
+        usage="jailbreak",
+        summary=f"Rattle the bars of the goo jail. {JAILBREAK_MIN_CHANCE} to {JAILBREAK_MAX_CHANCE}%, and it can cascade.",
+        detail=(
+            "Only usable from inside the goo jail channel, and only if you are actually serving time.\n\n"
+            f"**Your roll** is worth more the longer you have left. Someone freshly thrown in is angry enough "
+            f"for **{JAILBREAK_MAX_CHANCE}%**, someone about to walk free is down at **{JAILBREAK_MIN_CHANCE}%**. "
+            f"Try again once every {describe_duration(JAILBREAK_COOLDOWN)}.\n\n"
+            f"**If the lock gives**, the door stays open behind you. The prisoner with the most time left rolls "
+            f"**{JAILBREAK_FOLLOW_CHANCE}%** to follow you out, then the next, and so on down the line. "
+            "The first one caught ends the chain and the jail is secured.\n\n"
+            f"**Everyone still inside** when that happens serves **{describe_duration(JAILBREAK_PENALTY)}** extra "
+            "for the trouble, so a failed break is not free for the people you left behind."
+        ),
+        group=JAIL,
     ),
     'goolord': HelpEntry(
         usage="goolord",
@@ -176,7 +195,8 @@ class Help(commands.Cog):
             "Let us fight for the glory of the throne of goo.\n\n"
             f"`{prefix}hopinmygoo` is your repeatable roll at the crown. `{prefix}duel` is a much better "
             "shot but only once a day, and losing it puts you behind bars. Whoever is wearing the crown "
-            f"can `{prefix}banish` a rival and `{prefix}decree` whatever they like.\n\n"
+            f"can `{prefix}banish` a rival and `{prefix}decree` whatever they like. End up in the goo jail and "
+            f"`{prefix}jailbreak` is your way out, if you can drag the others with you.\n\n"
             "The leaderboard ranks **total time on the throne**, not wins."
         )
 
@@ -204,7 +224,7 @@ class Help(commands.Cog):
             if lines:
                 embed.add_field(name=group, value="\n\n".join(lines), inline=False)
 
-        embed.set_footer(text="The goo commands only work in the goo channels.")
+        embed.set_footer(text="The goo commands only work in the goo channels, and jailbreak only in the goo jail.")
         await ctx.send(embed=embed)
 
     async def send_command_help(self, ctx: commands.Context, command_name: str):
