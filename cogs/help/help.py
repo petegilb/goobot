@@ -126,8 +126,8 @@ HELP_ENTRIES: Dict[str, HelpEntry] = {
         usage="gooleaderboard",
         summary="The full standings, ranked by time on the throne.",
         detail=(
-            "The full table, ranked by total time as goo lord. Columns are time (minutes), wins, "
-            "current loss streak, total hops and longest ever loss streak.\n\n"
+            "The full table, ranked by total time as goo lord. Columns are time on the throne, "
+            "wins, current loss streak, total hops and longest ever loss streak.\n\n"
             "The current goo lord is highlighted in green and the biggest loser in red. "
             "People who have left the server are left out."
         ),

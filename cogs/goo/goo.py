@@ -57,6 +57,7 @@ JAILBREAK_PENALTY = 10*60
 # discord truncates a custom status past this
 MAX_STATUS_LENGTH = 128
 MAX_TOPIC_LENGTH = 1024
+MAX_LEADERBOARD_NAME = 14
 GOOLORD_ROLE_ID = require_id_env('GOOLORD_ROLE_ID')
 GOO_JAIL_ROLE_ID = require_id_env('GOO_JAIL_ROLE_ID')
 GOO_JAIL_CHANNEL_ID = require_id_env('GOO_JAIL_CHANNEL_ID')
@@ -109,6 +110,22 @@ def reign_seconds_since(last_win: datetime.datetime|None) -> float:
 
 def to_minutes(seconds: float) -> float:
     return round(float(seconds)/60, 2)
+
+
+def clip_name(name: str) -> str:
+    if len(name) <= MAX_LEADERBOARD_NAME:
+        return name
+    return name[:MAX_LEADERBOARD_NAME - 1] + "…"
+
+
+def format_lord_time(seconds: float) -> str:
+    """
+    format_countdown is for a single duration in writing but this is smaller
+    """
+    hours, minutes = divmod(max(int(seconds), 0) // 60, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
 
 
 def format_countdown(seconds: float) -> str:
@@ -852,7 +869,7 @@ class Goo(commands.Cog):
         lord_seconds_by_id = {db_user.id: total_lord_seconds(db_user, current_goolord) for db_user in db_users}
         sorted_db_users = sorted(db_users, key=lambda db_user: lord_seconds_by_id[db_user.id], reverse=True)
 
-        headers = ["User", "Time", "Win", "Loss", "Hops", "LS"]
+        headers = ["User", "Time", "W", "L", "Hops", "LS"]
         data = []
 
         for db_user in sorted_db_users:
@@ -860,16 +877,17 @@ class Goo(commands.Cog):
             if member is None:
                 continue
 
-            name = member.display_name
+            name = clip_name(member.display_name)
             if current_goolord is not None and current_goolord.id == db_user.id:
                 name = f"[32m{name}[0m"
             elif biggest_loser is not None and biggest_loser.id == db_user.id:
                 name = f"[31m{name}[0m"
-            lord_time_min = to_minutes(lord_seconds_by_id[db_user.id])
-            user_data = [name, lord_time_min, db_user.win_count, db_user.loss_count, db_user.hopped_goo, db_user.loss_streak]
+            lord_time = format_lord_time(lord_seconds_by_id[db_user.id])
+            user_data = [name, lord_time, db_user.win_count, db_user.loss_count, db_user.hopped_goo, db_user.loss_streak]
             data.append(user_data)
 
-        table_str = tabulate(data, headers)
+        # the time column is text now, so tabulate cannot right align it on its own
+        table_str = tabulate(data, headers, colalign=("left", "right", "right", "right", "right", "right"))
         await ctx.send(f"```ansi\n{table_str}```")
 
     @commands.command()
