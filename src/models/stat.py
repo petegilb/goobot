@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS stats (
     biggest_loser_id    BIGINT REFERENCES users(id),
     biggest_loser_count    BIGINT NOT NULL DEFAULT 0,
     banish_used        BOOLEAN NOT NULL DEFAULT FALSE,
-    decree             TEXT
+    decree             TEXT,
+    season_ends_at     TIMESTAMPTZ,
+    season_closed      BOOLEAN NOT NULL DEFAULT FALSE
 );
 -- ensure the single row exists:
 INSERT INTO stats (id) VALUES (1)
@@ -25,6 +27,8 @@ ON CONFLICT (id) DO NOTHING;
 # UPDATE stats SET biggest_loser_count = 16 WHERE id = 1;
 # ALTER TABLE stats ADD COLUMN banish_used BOOLEAN NOT NULL DEFAULT FALSE;
 # ALTER TABLE stats ADD COLUMN decree TEXT;
+# ALTER TABLE stats ADD COLUMN season_ends_at TIMESTAMPTZ;
+# ALTER TABLE stats ADD COLUMN season_closed BOOLEAN NOT NULL DEFAULT FALSE;
 
 class Stat(BaseModel):
     """
@@ -39,6 +43,8 @@ class Stat(BaseModel):
     biggest_loser_count: int
     banish_used: bool
     decree: str|None
+    season_ends_at: datetime|None
+    season_closed: bool
 
 async def get_stats(pool: asyncpg.Pool) -> Stat|None:
     async with pool.acquire() as connection:
@@ -71,6 +77,51 @@ async def set_decree(pool: asyncpg.Pool, decree: str):
         'updated_at': datetime.now(tz=timezone.utc)
     }
     await update_fields(pool, 'stats', 1, updates)
+
+
+async def set_season_end(pool: asyncpg.Pool, season_ends_at: datetime|None):
+    updates = {
+        'season_ends_at': season_ends_at,
+        'updated_at': datetime.now(tz=timezone.utc)
+    }
+    await update_fields(pool, 'stats', 1, updates)
+
+
+async def close_season(pool: asyncpg.Pool) -> bool:
+    """
+    Returns whether this call is the one that closed the season, so the timer
+    and a manual !endseason cannot both run the closing twice.
+    """
+    sql = """
+    UPDATE stats
+        SET season_closed = TRUE,
+            updated_at = $1
+        WHERE id = 1
+          AND season_closed = FALSE
+    RETURNING id;
+    """
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, datetime.now(tz=timezone.utc))
+            return row is not None
+
+
+async def reopen_season(pool: asyncpg.Pool) -> bool:
+    sql = """
+    UPDATE stats
+        SET season_closed = FALSE,
+            season_ends_at = NULL,
+            updated_at = $1
+        WHERE id = 1
+          AND season_closed = TRUE
+    RETURNING id;
+    """
+    async with pool.acquire() as connection:
+        conn : asyncpg.connection.Connection = connection
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, datetime.now(tz=timezone.utc))
+            return row is not None
 
 
 async def set_biggest_loser(pool: asyncpg.Pool, biggest_loser_id: int, biggest_loser_count: int):

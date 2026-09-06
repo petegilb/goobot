@@ -149,11 +149,52 @@ HELP_ENTRIES: Dict[str, HelpEntry] = {
         detail="Dumps the raw global stats record: current lord, biggest loser, and when things last changed.",
         group=LOOKUP,
     ),
+    'seasonend': HelpEntry(
+        usage="seasonend",
+        summary="How long is left in the season.",
+        detail=(
+            "Shows when the season is due to end and how long that is from now.\n\n"
+            "When it ends, the final standings are posted, everybody walks out of goo jail, and "
+            "the throne is frozen with whoever is sitting on it. Nobody can play after that."
+        ),
+        group=LOOKUP,
+    ),
     'gooball': HelpEntry(
         usage="gooball",
         summary="GOOOOOOB.",
         detail="Posts the gooball. That is the entire feature.",
         group=OTHER,
+    ),
+    'setseasonend': HelpEntry(
+        usage="setseasonend <when>",
+        summary="Schedule when the season ends.",
+        detail=(
+            "Sets the moment the season closes itself. Takes a duration like `7d`, `12h` or `90m`, "
+            "or an exact time like `2026-10-01 20:00` which is read as UTC.\n\n"
+            "The bot checks every 30 seconds, so the close lands within a minute of the time you set. "
+            "Run it again at any point to move the date."
+        ),
+        group=ADMIN,
+    ),
+    'endseason': HelpEntry(
+        usage="endseason",
+        summary="End the season right now.",
+        detail=(
+            "Closes the season immediately rather than waiting for the scheduled time.\n\n"
+            "Posts the final standings and takes the goo jail role off everybody. The goo lord keeps "
+            "their crown, and every record is left exactly as it is. Looking things up still works, "
+            "only the commands that advance the game are turned off."
+        ),
+        group=ADMIN,
+    ),
+    'reopenseason': HelpEntry(
+        usage="reopenseason",
+        summary="Undo the ending and start play again.",
+        detail=(
+            "Clears the scheduled end time and lets the commands work again. Nothing was deleted when "
+            "the season ended, so play picks up from exactly where it stopped."
+        ),
+        group=ADMIN,
     ),
     'hello': HelpEntry(
         usage="hello [user]",

@@ -12,7 +12,10 @@ from tabulate import tabulate
 from discord.ext import commands, tasks
 from src.jail import JailSentence
 from src.models.user import User, init_user, record_win, record_loss, claim_daily_duel, update_user, get_user, get_all_users
-from src.models.stat import Stat, get_stats, set_goo_lord, set_biggest_loser, use_banish, set_decree
+from src.models.stat import (
+    Stat, get_stats, set_goo_lord, set_biggest_loser, use_banish, set_decree,
+    set_season_end, close_season, reopen_season,
+)
 
 if TYPE_CHECKING:
     from main import GooBot
@@ -93,19 +96,33 @@ JAILBREAK_EMPTY_MESSAGE = "the cells behind them are empty. nobody else was ther
 JAILBREAK_CLEARED_MESSAGE = "the goo jail stands empty. every last prisoner is loose."
 JAILBREAK_PENALTY_MESSAGE = "{0} prisoner(s) stay behind, and earn {1} more minute(s) for the trouble."
 JAILBREAK_ANNOUNCE_MESSAGE = "🔓 word reaches the kingdom of goo: {0} broke out of goo jail!"
+SEASON_CLOSED_MESSAGE = "The season is over. The goo has set. There is nothing left to hop in."
+SEASON_END_MESSAGE = """🏁 **THE GOO SEASON HAS ENDED** 🏁
+
+the goo has found its true lord. the throne is sealed once more.
+{0}
+
+final standings:"""
+SEASON_CHAMPION_MESSAGE = "your champion is <@{0}>, who held the throne for {1}. all hail."
+SEASON_NO_CHAMPION_MESSAGE = "nobody ever took the throne. a shameful season."
+SEASON_REOPEN_MESSAGE = "the goo throne is vacant once again. hop to it."
+SEASON_CLOSED_STATUS = "the season is over"
 
 
 def utc_now() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
-def reign_seconds_since(last_win: datetime.datetime|None) -> float:
+def reign_seconds_since(last_win: datetime.datetime|None, until: datetime.datetime|None = None) -> float:
     """
     A goo lord can have no last_win if their reign predates the stored history.
+
+    Once the season closes the clock stops at its ending, so the lord left on the
+    throne does not keep collecting reign time forever.
     """
     if last_win is None:
         return 0.0
-    return (utc_now() - last_win).total_seconds()
+    return max(((until or utc_now()) - last_win).total_seconds(), 0.0)
 
 
 def to_minutes(seconds: float) -> float:
@@ -139,9 +156,9 @@ def format_countdown(seconds: float) -> str:
     return "less than a minute"
 
 
-def total_lord_seconds(db_user: User, current_goolord: User|None) -> float:
+def total_lord_seconds(db_user: User, current_goolord: User|None, until: datetime.datetime|None = None) -> float:
     if current_goolord is not None and current_goolord.id == db_user.id:
-        return db_user.lord_time + reign_seconds_since(db_user.last_win)
+        return db_user.lord_time + reign_seconds_since(db_user.last_win, until)
     return db_user.lord_time
 
 
@@ -172,6 +189,40 @@ def jailbreak_chance(sentence: JailSentence, now: datetime.datetime) -> int:
     return round(JAILBREAK_MIN_CHANCE + span * sentence.fraction_remaining(now))
 
 
+DURATION_PATTERN = re.compile(r'^(\d+)\s*([dhm])$', re.IGNORECASE)
+DURATION_UNITS = {'d': 24*60*60, 'h': 60*60, 'm': 60}
+
+
+def parse_season_end(text: str, now: datetime.datetime) -> datetime.datetime|None:
+    text = text.strip()
+
+    duration = DURATION_PATTERN.match(text)
+    if duration is not None:
+        seconds = int(duration.group(1)) * DURATION_UNITS[duration.group(2).lower()]
+        return now + datetime.timedelta(seconds=seconds)
+
+    try:
+        moment = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # a date with no zone is read as utc rather than whatever the host is set to
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment
+
+
+async def season_is_open(ctx: commands.Context) -> bool:
+    """
+    The gate on every command that advances the game. Lookups stay open so the
+    final standings can still be read afterwards.
+    """
+    cog: 'Goo|None' = ctx.cog
+    if cog is None or not await cog.is_season_closed():
+        return True
+    await ctx.reply(SEASON_CLOSED_MESSAGE)
+    return False
+
+
 class ConfigProblem(NamedTuple):
     # 'error' means a feature is broken, 'warning' means it is degraded
     severity: str
@@ -181,11 +232,15 @@ class Goo(commands.Cog):
 
     def __init__(self, bot):
         self.bot: GooBot = bot
+        # None until the db has been read, so the gate never guesses
+        self.season_closed: bool|None = None
         self.free_from_jail.start()
+        self.end_season_when_due.start()
         self.startup_check = asyncio.create_task(self.check_existing_goolord())
 
     def cog_unload(self):
         self.free_from_jail.cancel()
+        self.end_season_when_due.cancel()
         self.startup_check.cancel()
 
     def get_pool(self) -> asyncpg.Pool|None:
@@ -193,6 +248,20 @@ class Goo(commands.Cog):
             logger.error("db pool doesn't exist or is closing")
             return None
         return self.bot.db_pool
+
+    async def is_season_closed(self) -> bool:
+        if self.season_closed is None:
+            pool = self.get_pool()
+            stats = await get_stats(pool) if pool is not None else None
+            self.season_closed = stats is not None and stats.season_closed
+        return self.season_closed
+
+    async def reign_clock_stop(self) -> datetime.datetime|None:
+        if not await self.is_season_closed():
+            return None
+        pool = self.get_pool()
+        stats = await get_stats(pool) if pool is not None else None
+        return stats.season_ends_at if stats is not None else None
 
     def check_role(self, guild: discord.Guild, bot_member: discord.Member, role_id: int, label: str) -> List[ConfigProblem]:
         role = guild.get_role(role_id)
@@ -349,9 +418,7 @@ class Goo(commands.Cog):
             return
 
         # the channel topic survives a restart on its own, the bot status does not
-        stats = await get_stats(pool)
-        if stats is not None and stats.decree:
-            await self.set_decree_status(stats.decree)
+        await self.restore_status()
 
         guild = self.bot.get_guild(GUILD_ID)
         channel = self.bot.get_channel(GOO_CHANNELS[0])
@@ -408,9 +475,176 @@ class Goo(commands.Cog):
         logger.error("goo jail loop failed, restarting it", exc_info=error)
         self.free_from_jail.restart()
 
+    @tasks.loop(seconds=30.0)
+    async def end_season_when_due(self):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        stats = await get_stats(pool)
+        if stats is None or stats.season_closed or stats.season_ends_at is None:
+            return
+        if stats.season_ends_at > utc_now():
+            return
+
+        guild = self.bot.get_guild(GUILD_ID)
+        if guild is None:
+            logger.error(f"The season is due to end but guild {GUILD_ID} is missing")
+            return
+        logger.info("The season end time has passed, closing the season")
+        await self.end_the_season(guild)
+
+    @end_season_when_due.before_loop
+    async def before_end_season_when_due(self):
+        await self.bot.wait_until_ready()
+
+    @end_season_when_due.error
+    async def end_season_when_due_error(self, error: Exception):
+        logger.error("season end loop failed, restarting it", exc_info=error)
+        self.end_season_when_due.restart()
+
+    async def end_the_season(self, guild: discord.Guild) -> bool:
+        """
+        Posts the closing standings and empties the jail. The goo lord keeps
+        their crown, and the commands themselves are what stop the game.
+        """
+        pool = self.get_pool()
+        if pool is None:
+            return False
+
+        # flipped first so the timer and a manual !endseason cannot both close
+        if not await close_season(pool):
+            return False
+        self.season_closed = True
+
+        stats = await get_stats(pool)
+        if stats is not None and stats.season_ends_at is None:
+            await set_season_end(pool, utc_now())
+
+        await self.announce_season_end(guild)
+        freed = await self.release_everyone_from_jail(guild)
+        logger.info(f"Season closed, {freed} member(s) let out of jail")
+        await self.set_status(SEASON_CLOSED_STATUS)
+        return True
+
+    async def announce_season_end(self, guild: discord.Guild):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        stats = await get_stats(pool)
+        current_goolord = await get_goolord(pool, stats)
+        clock_stop = await self.reign_clock_stop()
+
+        if current_goolord is None:
+            closing = SEASON_NO_CHAMPION_MESSAGE
+        else:
+            reign = total_lord_seconds(current_goolord, current_goolord, clock_stop)
+            closing = SEASON_CHAMPION_MESSAGE.format(current_goolord.id, format_countdown(reign))
+
+        channel = self.bot.get_channel(GOO_CHANNELS[0])
+        if channel is None:
+            logger.error("Could not find the primary goo channel to announce the season end in")
+            return
+        try:
+            await channel.send(SEASON_END_MESSAGE.format(closing))
+            await channel.send(await self.build_leaderboard(guild))
+        except discord.HTTPException:
+            logger.exception("Failed to announce the season end")
+
+    async def release_everyone_from_jail(self, guild: discord.Guild) -> int:
+        jail_role = guild.get_role(GOO_JAIL_ROLE_ID)
+        if jail_role is None:
+            logger.error(f"Could not find the goo jail role {GOO_JAIL_ROLE_ID}")
+            return 0
+
+        freed = 0
+        for member in list(jail_role.members):
+            if await self.release_from_jail(jail_role, member):
+                freed += 1
+        self.bot.jail_counter.clear()
+        return freed
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def setseasonend(self, ctx: commands.Context, *, when: str = None):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        if await self.is_season_closed():
+            await ctx.reply("The season is already over. Use `!reopenseason` first.")
+            return
+        if when is None or not when.strip():
+            await ctx.reply("When should it end? Try `!setseasonend 7d`, `12h`, `90m`, or `2026-10-01 20:00` (UTC).")
+            return
+
+        now = utc_now()
+        ends_at = parse_season_end(when, now)
+        if ends_at is None:
+            await ctx.reply("I could not read that time. Try `7d`, `12h`, `90m`, or `2026-10-01 20:00` (UTC).")
+            return
+        if ends_at <= now:
+            await ctx.reply("That is already in the past. Use `!endseason` to end it right now.")
+            return
+
+        await set_season_end(pool, ends_at)
+        await ctx.reply(
+            f"The season now ends <t:{int(ends_at.timestamp())}:F>, which is in {format_countdown((ends_at - now).total_seconds())}."
+        )
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def endseason(self, ctx: commands.Context):
+        if not await self.end_the_season(ctx.guild):
+            await ctx.reply("The season is already over.")
+            return
+        await ctx.reply("The season is closed. The jail is empty and nobody can play until you reopen it.")
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def reopenseason(self, ctx: commands.Context):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        if not await reopen_season(pool):
+            await ctx.reply("The season is already running.")
+            return
+        self.season_closed = False
+
+        await self.restore_status()
+        channel = self.bot.get_channel(GOO_CHANNELS[0])
+        if channel is not None:
+            await channel.send(SEASON_REOPEN_MESSAGE)
+        await ctx.reply("The season is open again and the end time has been cleared.")
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def seasonend(self, ctx: commands.Context):
+        pool = self.get_pool()
+        if pool is None:
+            return
+
+        stats = await get_stats(pool)
+        if stats is None:
+            return
+        if stats.season_closed:
+            await ctx.reply(SEASON_CLOSED_MESSAGE)
+            return
+        if stats.season_ends_at is None:
+            await ctx.reply("No end has been set. The goo flows on indefinitely.")
+            return
+
+        remaining = (stats.season_ends_at - utc_now()).total_seconds()
+        await ctx.reply(
+            f"The season ends <t:{int(stats.season_ends_at.timestamp())}:F>, which is in {format_countdown(remaining)}."
+        )
+
     @commands.cooldown(1, GOO_COOLDOWN, commands.BucketType.user)
     @commands.command()
     @commands.check(is_goo_channel)
+    @commands.check(season_is_open)
     async def hopinmygoo(self, ctx: commands.Context):
         pool = self.get_pool()
         if pool is None:
@@ -550,6 +784,7 @@ class Goo(commands.Cog):
     @commands.cooldown(1, JAILBREAK_COOLDOWN, commands.BucketType.user)
     @commands.command()
     @commands.check(is_jail_channel)
+    @commands.check(season_is_open)
     async def jailbreak(self, ctx: commands.Context):
         jail_role = ctx.guild.get_role(GOO_JAIL_ROLE_ID)
         if jail_role is None:
@@ -622,6 +857,7 @@ class Goo(commands.Cog):
 
     @commands.command()
     @commands.check(is_goo_channel)
+    @commands.check(season_is_open)
     async def duel(self, ctx: commands.Context):
         pool = self.get_pool()
         if pool is None:
@@ -677,6 +913,7 @@ class Goo(commands.Cog):
 
     @commands.command()
     @commands.check(is_goo_channel)
+    @commands.check(season_is_open)
     async def banish(self, ctx: commands.Context, *, member: discord.Member = None):
         pool = self.get_pool()
         if pool is None:
@@ -722,6 +959,7 @@ class Goo(commands.Cog):
     @commands.cooldown(1, DECREE_COOLDOWN, commands.BucketType.channel)
     @commands.command()
     @commands.check(is_goo_channel)
+    @commands.check(season_is_open)
     async def decree(self, ctx: commands.Context, *, text: str = None):
         pool = self.get_pool()
         if pool is None:
@@ -767,13 +1005,30 @@ class Goo(commands.Cog):
             logger.exception("Failed to broadcast the decree")
 
     async def set_decree_status(self, text: str):
+        await self.set_status(text)
+
+    async def set_status(self, text: str):
         try:
             await self.bot.change_presence(
                 status=discord.Status.online,
                 activity=discord.CustomActivity(name=text[:MAX_STATUS_LENGTH])
             )
         except discord.HTTPException:
-            logger.exception("Failed to set the bot status from the decree")
+            logger.exception("Failed to set the bot status")
+
+    async def restore_status(self):
+        """
+        The status is whatever the standing decree says, unless the season is
+        over, in which case that is the only thing worth saying.
+        """
+        if await self.is_season_closed():
+            await self.set_status(SEASON_CLOSED_STATUS)
+            return
+
+        pool = self.get_pool()
+        stats = await get_stats(pool) if pool is not None else None
+        if stats is not None and stats.decree:
+            await self.set_status(stats.decree)
 
     async def set_decree_topic(self, channel: discord.abc.GuildChannel, text: str):
         # channel topic edits are heavily rate limited, hence the command cooldown
@@ -839,34 +1094,33 @@ class Goo(commands.Cog):
             return
 
         num_wins = db_reign_user.win_count
-        win_time = to_minutes(total_lord_seconds(db_reign_user, current_goolord))
+        win_time = to_minutes(total_lord_seconds(db_reign_user, current_goolord, await self.reign_clock_stop()))
 
         response = f"Ah yes, the glorious reign of {reign_user_name} the great."
         response = f"{response}\nThey have ruled over the kingdom of Flan {num_wins} time(s) for a total time of: {win_time} minute(s)."
 
         await ctx.reply(response)
 
-    @commands.command()
-    @commands.check(is_goo_channel)
-    async def gooleaderboard(self, ctx: commands.Context):
+    async def build_leaderboard(self, guild: discord.Guild) -> str:
         pool = self.get_pool()
         if pool is None:
-            return
+            return "The leaderboard is unavailable right now."
 
         stats = await get_stats(pool)
         current_goolord = await get_goolord(pool, stats)
         biggest_loser = await get_biggest_loser(pool, stats)
+        clock_stop = await self.reign_clock_stop()
 
         db_users = await get_all_users(pool)
 
         # members who have left the guild are dropped rather than shown as blanks
         members_by_id: Dict[int, discord.Member] = {}
         for db_user in db_users:
-            member = ctx.guild.get_member(db_user.id)
+            member = guild.get_member(db_user.id)
             if member is not None:
                 members_by_id[db_user.id] = member
 
-        lord_seconds_by_id = {db_user.id: total_lord_seconds(db_user, current_goolord) for db_user in db_users}
+        lord_seconds_by_id = {db_user.id: total_lord_seconds(db_user, current_goolord, clock_stop) for db_user in db_users}
         sorted_db_users = sorted(db_users, key=lambda db_user: lord_seconds_by_id[db_user.id], reverse=True)
 
         headers = ["User", "Time", "W", "L", "Hops", "LS"]
@@ -888,7 +1142,14 @@ class Goo(commands.Cog):
 
         # the time column is text now, so tabulate cannot right align it on its own
         table_str = tabulate(data, headers, colalign=("left", "right", "right", "right", "right", "right"))
-        await ctx.send(f"```ansi\n{table_str}```")
+        return f"```ansi\n{table_str}```"
+
+    @commands.command()
+    @commands.check(is_goo_channel)
+    async def gooleaderboard(self, ctx: commands.Context):
+        if self.get_pool() is None:
+            return
+        await ctx.send(await self.build_leaderboard(ctx.guild))
 
     @commands.command()
     @commands.check(is_goo_channel)
@@ -921,7 +1182,12 @@ class Goo(commands.Cog):
             await ctx.reply("The throne lies empty...")
             return
 
-        lord_time = to_minutes(reign_seconds_since(current_goolord.last_win))
+        clock_stop = await self.reign_clock_stop()
+        lord_time = to_minutes(reign_seconds_since(current_goolord.last_win, clock_stop))
+        if clock_stop is not None:
+            await ctx.reply(f"the season ended with <@{current_goolord.id}> on the throne, after a final reign of {lord_time} minute(s).")
+            return
+
         lord_str = f"the current goo lord is <@{current_goolord.id}>. their current reign has been {lord_time} minute(s)."
         await ctx.reply(lord_str)
 
