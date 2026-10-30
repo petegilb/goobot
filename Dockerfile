@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm
+FROM ghcr.io/astral-sh/uv:0.13.6-python3.13-trixie
 
 # referenced https://github.com/astral-sh/uv-docker-example/blob/main/Dockerfile
 
